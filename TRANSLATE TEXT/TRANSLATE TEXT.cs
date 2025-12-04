@@ -54,7 +54,7 @@ namespace AutoCADTranslatePlugin
 		public static async Task RandomSleep() => await Task.Delay(_rnd.Next(300, 1000));
 	}
 
-	// --- 3. FORMAT PROTECTOR (XỬ LÝ TRIỆT ĐỂ KHOẢNG TRẮNG SAU MÃ LỆNH) ---
+	// --- 3. FORMAT PROTECTOR (HANDLES CODES & WHITESPACE) ---
 	public static class FormatProtector
 	{
 		private static readonly Regex _regexCodes = new Regex(
@@ -79,7 +79,7 @@ namespace AutoCADTranslatePlugin
 			if (string.IsNullOrEmpty(input)) { result.MaskedText = input; return result; }
 
 			int index = 0;
-			// Thêm khoảng trắng đệm [ID:n] để Google dịch ngữ cảnh tốt
+			// Add padding [ID:n] so Google translates context better
 			result.MaskedText = _regexCodes.Replace(input, m =>
 			{
 				result.Codes.Add(m.Value);
@@ -93,40 +93,40 @@ namespace AutoCADTranslatePlugin
 		{
 			if (string.IsNullOrEmpty(translated) || codes == null || codes.Count == 0) return translated.Trim();
 
-			// 1. Trả lại mã gốc vào vị trí ID
+			// 1. Restore codes to ID positions
 			for (int i = 0; i < codes.Count; i++)
 			{
 				string pattern = $@"\[\s*ID\s*:\s*{i}\s*\]";
 				translated = Regex.Replace(translated, pattern, match => codes[i], RegexOptions.IgnoreCase);
 			}
 
-			// --- BƯỚC QUAN TRỌNG: CLEAN UP ---
+			// --- CLEAN UP STEPS ---
 
-			// 2. Xử lý mã xuống dòng \P: Xóa sạch khoảng trắng bao quanh nó
-			// "Text   \P   Text" -> "Text\PText"
-			translated = Regex.Replace(translated, @"\s*(\\P)\s*", @"\P", RegexOptions.IgnoreCase);
+			// 2. Handle Newline \P: Remove surrounding whitespace
+			// FIXED: Changed to RegexOptions.None to distinguish \P (Newline) from \p (Paragraph)
+			translated = Regex.Replace(translated, @"\s*(\\P)\s*", @"\P", RegexOptions.None);
 
-			// 3. [FIX MỚI] Xử lý khoảng trắng SAU mã lệnh (Nguyên nhân gây lỗi dòng đầu tiên)
-			// Ví dụ: "\A1;  TEXT" -> "\A1;TEXT"
-			// Regex tìm: (Mã lệnh kết thúc bằng ;) + (Khoảng trắng thừa) -> Thay bằng (Mã lệnh)
+			// 3. Handle whitespace AFTER formatting codes
+			// E.g., "\A1;  TEXT" -> "\A1;TEXT"
 			translated = Regex.Replace(translated, @"(\\[A-Za-z0-9]+[^;]*;)\s+", @"$1", RegexOptions.IgnoreCase);
 
-			// 4. Xử lý khoảng trắng sau các mã switch đơn lẻ như \L, \O
+			// 4. Handle whitespace after single switch codes like \L, \O
 			translated = Regex.Replace(translated, @"(\\[LloOkK])\s+", @"$1", RegexOptions.IgnoreCase);
 
-			// 5. Cắt dòng và Trim từng dòng (Chốt chặn cuối cùng)
-			string[] lines = Regex.Split(translated, @"\\P", RegexOptions.IgnoreCase);
+			// 5. Split lines and Trim each line
+			// FIXED: Changed to RegexOptions.None to avoid splitting on \p
+			string[] lines = Regex.Split(translated, @"\\P", RegexOptions.None);
 			for (int j = 0; j < lines.Length; j++)
 			{
 				lines[j] = lines[j].Trim();
 			}
 
-			// 6. Ghép lại
+			// 6. Join back
 			return string.Join("\\P", lines);
 		}
 	}
 
-	// --- 4. LANGUAGE HELPER (ĐÃ KHÔI PHỤC ĐẦY ĐỦ DANH SÁCH) ---
+	// --- 4. LANGUAGE HELPER ---
 	public class LanguageItem
 	{
 		public string Code { get; set; }
@@ -350,7 +350,7 @@ namespace AutoCADTranslatePlugin
 					if (response.IsSuccessStatusCode)
 					{
 						string json = await response.Content.ReadAsStringAsync();
-						// STRICT PARSER (Đã chặn lỗi vivi)
+						// STRICT PARSER (Prevents vivi errors)
 						return ParseResultStrict(json, input);
 					}
 
@@ -448,7 +448,7 @@ namespace AutoCADTranslatePlugin
 
 			this.Controls.Add(new Label { Text = "Source Lang:", Left = pad, Top = top, Width = lblW });
 			cbSource = new ComboBox { Left = pad + lblW, Top = top - 3, Width = cbW, DropDownStyle = ComboBoxStyle.DropDownList };
-			// Load ngôn ngữ từ class Helper
+			// Load Languages
 			foreach (var lang in LanguageList.GetSupportedLanguages()) cbSource.Items.Add(lang);
 			SetComboValue(cbSource, defaultSource);
 			this.Controls.Add(cbSource);
