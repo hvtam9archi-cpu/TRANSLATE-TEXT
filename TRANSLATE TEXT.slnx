@@ -3,7 +3,7 @@
     <Platform Name="Any CPU" />
     <Platform Name="x64" />
   </Configurations>
-  <Project Path="TRANSLATE TEXT/TRANSLATE TEXT.csproj">
+  <Project Path="TRANSLATE TEXT/TRANSLATE TEXT.csproj" Id="f5001958-60ff-47fd-8da3-ba8409511970">
     <Platform Solution="*|x64" Project="x64" />
   </Project>
 </Solution>

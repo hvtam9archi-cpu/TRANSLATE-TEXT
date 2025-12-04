@@ -5,6 +5,8 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Net.Http;
 using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using System.Drawing;
 using System.Threading;
 using System.Net;
 
@@ -15,16 +17,14 @@ using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 
-// --- PHẦN SỬA LỖI XUNG ĐỘT TÊN (QUAN TRỌNG) ---
-// Tạo tên riêng (Alias) cho các thư viện để không bị nhầm lẫn
+// Alias
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
-using WinForms = System.Windows.Forms;
-using Drawing = System.Drawing;
 
 [assembly: CommandClass(typeof(AutoCADTranslatePlugin.TranslateCommands))]
 
 namespace AutoCADTranslatePlugin
 {
+	// --- 1. DATA OBJECTS ---
 	public class TextDataObj
 	{
 		public ObjectId ObjId { get; set; }
@@ -36,62 +36,54 @@ namespace AutoCADTranslatePlugin
 	public class MaskResult
 	{
 		public string MaskedText { get; set; }
-		public List<string> Codes { get; set; }
+		public List<string> Codes { get; set; } = new List<string>();
 	}
 
-	// Class Ngụy trang User-Agent
+	// --- 2. UTILITIES ---
 	public static class StealthWebClient
 	{
 		private static readonly Random _rnd = new Random();
-
 		private static readonly string[] _userAgents = new string[]
 		{
-			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-			"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0",
-			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36 Edg/115.0.1901.188"
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
 		};
 
-		public static string GetRandomUserAgent()
-		{
-			return _userAgents[_rnd.Next(_userAgents.Length)];
-		}
-
-		public static async Task RandomSleep()
-		{
-			await Task.Delay(_rnd.Next(200, 800));
-		}
+		public static string GetRandomUserAgent() => _userAgents[_rnd.Next(_userAgents.Length)];
+		public static async Task RandomSleep() => await Task.Delay(_rnd.Next(300, 1000));
 	}
 
+	// --- 3. FORMAT PROTECTOR (XỬ LÝ TRIỆT ĐỂ KHOẢNG TRẮNG SAU MÃ LỆNH) ---
 	public static class FormatProtector
 	{
 		private static readonly Regex _regexCodes = new Regex(
-			@"(%%[UuOoCcDdPp%])|" +
+			// Hex Code 32 chars (Data Link)
+			@"(\{[^}]*[0-9a-fA-F]{32}[^}]*\})|" +
+			@"(\\[A-Za-z0-9]*[0-9a-fA-F]{32})|" +
+			@"\b[0-9a-fA-F]{32}\b|" +
+			// Field Code
+			@"(%<[^>]+>%)|" +
+			// MText Codes (\P, \L, \W...)
 			@"(\\P)|" +
 			@"(\\[LloOkK])|" +
 			@"(\\[\\{}])|" +
-			@"(\\[A-Za-z0-9]+;)|" +
+			@"(\\[A-Za-z0-9]+[^;]*;)|" +
+			// Brackets
 			@"({|})",
-			RegexOptions.Compiled);
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
 		public static MaskResult MaskText(string input)
 		{
 			var result = new MaskResult();
-			result.Codes = new List<string>();
-
-			if (string.IsNullOrEmpty(input))
-			{
-				result.MaskedText = input;
-				return result;
-			}
+			if (string.IsNullOrEmpty(input)) { result.MaskedText = input; return result; }
 
 			int index = 0;
+			// Thêm khoảng trắng đệm [ID:n] để Google dịch ngữ cảnh tốt
 			result.MaskedText = _regexCodes.Replace(input, m =>
 			{
 				result.Codes.Add(m.Value);
-				return $"__TAG{index++}__";
+				return $" [ID:{index++}] ";
 			});
 
 			return result;
@@ -99,17 +91,80 @@ namespace AutoCADTranslatePlugin
 
 		public static string UnmaskText(string translated, List<string> codes)
 		{
-			if (string.IsNullOrEmpty(translated) || codes == null || codes.Count == 0) return translated;
+			if (string.IsNullOrEmpty(translated) || codes == null || codes.Count == 0) return translated.Trim();
 
+			// 1. Trả lại mã gốc vào vị trí ID
 			for (int i = 0; i < codes.Count; i++)
 			{
-				string pattern = $@"__\s*TAG{i}\s*__";
-				translated = Regex.Replace(translated, pattern, codes[i], RegexOptions.IgnoreCase);
+				string pattern = $@"\[\s*ID\s*:\s*{i}\s*\]";
+				translated = Regex.Replace(translated, pattern, match => codes[i], RegexOptions.IgnoreCase);
 			}
-			return translated;
+
+			// --- BƯỚC QUAN TRỌNG: CLEAN UP ---
+
+			// 2. Xử lý mã xuống dòng \P: Xóa sạch khoảng trắng bao quanh nó
+			// "Text   \P   Text" -> "Text\PText"
+			translated = Regex.Replace(translated, @"\s*(\\P)\s*", @"\P", RegexOptions.IgnoreCase);
+
+			// 3. [FIX MỚI] Xử lý khoảng trắng SAU mã lệnh (Nguyên nhân gây lỗi dòng đầu tiên)
+			// Ví dụ: "\A1;  TEXT" -> "\A1;TEXT"
+			// Regex tìm: (Mã lệnh kết thúc bằng ;) + (Khoảng trắng thừa) -> Thay bằng (Mã lệnh)
+			translated = Regex.Replace(translated, @"(\\[A-Za-z0-9]+[^;]*;)\s+", @"$1", RegexOptions.IgnoreCase);
+
+			// 4. Xử lý khoảng trắng sau các mã switch đơn lẻ như \L, \O
+			translated = Regex.Replace(translated, @"(\\[LloOkK])\s+", @"$1", RegexOptions.IgnoreCase);
+
+			// 5. Cắt dòng và Trim từng dòng (Chốt chặn cuối cùng)
+			string[] lines = Regex.Split(translated, @"\\P", RegexOptions.IgnoreCase);
+			for (int j = 0; j < lines.Length; j++)
+			{
+				lines[j] = lines[j].Trim();
+			}
+
+			// 6. Ghép lại
+			return string.Join("\\P", lines);
 		}
 	}
 
+	// --- 4. LANGUAGE HELPER (ĐÃ KHÔI PHỤC ĐẦY ĐỦ DANH SÁCH) ---
+	public class LanguageItem
+	{
+		public string Code { get; set; }
+		public string Name { get; set; }
+		public override string ToString() => Name;
+	}
+
+	public static class LanguageList
+	{
+		public static List<LanguageItem> GetSupportedLanguages()
+		{
+			return new List<LanguageItem>
+			{
+				new LanguageItem { Code = "auto", Name = "Auto Detect" },
+				new LanguageItem { Code = "vi", Name = "Vietnamese (Tiếng Việt)" },
+				new LanguageItem { Code = "en", Name = "English" },
+				new LanguageItem { Code = "ko", Name = "Korean (Hàn Quốc)" },
+				new LanguageItem { Code = "ja", Name = "Japanese (Nhật Bản)" },
+				new LanguageItem { Code = "zh-CN", Name = "Chinese Simplified (Trung Giản thể)" },
+				new LanguageItem { Code = "zh-TW", Name = "Chinese Traditional (Trung Phồn thể)" },
+				new LanguageItem { Code = "fr", Name = "French (Pháp)" },
+				new LanguageItem { Code = "de", Name = "German (Đức)" },
+				new LanguageItem { Code = "ru", Name = "Russian (Nga)" },
+				new LanguageItem { Code = "es", Name = "Spanish (Tây Ban Nha)" },
+				new LanguageItem { Code = "th", Name = "Thai (Thái Lan)" },
+				new LanguageItem { Code = "lo", Name = "Lao (Lào)" },
+				new LanguageItem { Code = "km", Name = "Khmer (Campuchia)" },
+				new LanguageItem { Code = "id", Name = "Indonesian (Indonesia)" },
+				new LanguageItem { Code = "ms", Name = "Malay (Malaysia)" },
+				new LanguageItem { Code = "it", Name = "Italian (Ý)" },
+				new LanguageItem { Code = "pt", Name = "Portuguese (Bồ Đào Nha)" },
+				new LanguageItem { Code = "hi", Name = "Hindi (Ấn Độ)" },
+				new LanguageItem { Code = "ar", Name = "Arabic (Ả Rập)" }
+			};
+		}
+	}
+
+	// --- 5. MAIN COMMANDS ---
 	public class TranslateCommands
 	{
 		private static string _lastSourceLang = "auto";
@@ -126,7 +181,7 @@ namespace AutoCADTranslatePlugin
 			Editor ed = doc.Editor;
 			Database db = doc.Database;
 
-			// 0. Lấy danh sách Text Style
+			// 0. Get Styles
 			List<string> styleNames = new List<string>() { "Keep Original" };
 			using (Transaction tr = doc.TransactionManager.StartTransaction())
 			{
@@ -139,323 +194,299 @@ namespace AutoCADTranslatePlugin
 				tr.Commit();
 			}
 
-			// 1. Hiển thị Form (Sử dụng WinForms.DialogResult để tránh lỗi)
+			// 1. Show Form
 			string selectedStyleName = "Keep Original";
 			using (var form = new LanguageSelectionForm(_lastSourceLang, _lastTargetLang, styleNames, _lastTextStyle))
 			{
-				var result = AcApp.ShowModalDialog(form);
-				if (result != WinForms.DialogResult.OK) return; // Sửa lỗi DialogResult
-
+				if (AcApp.ShowModalDialog(form) != DialogResult.OK) return;
 				_lastSourceLang = form.SelectedSourceCode;
 				_lastTargetLang = form.SelectedTargetCode;
 				_lastTextStyle = form.SelectedTextStyle;
 				selectedStyleName = form.SelectedTextStyle;
 			}
 
-			// 2. Chọn đối tượng
-			TypedValue[] filterList = new TypedValue[] {
+			// 2. Select Objects
+			var filter = new SelectionFilter(new TypedValue[] {
 				new TypedValue((int)DxfCode.Operator, "<OR"),
 				new TypedValue((int)DxfCode.Start, "TEXT"),
 				new TypedValue((int)DxfCode.Start, "MTEXT"),
 				new TypedValue((int)DxfCode.Start, "MULTILEADER"),
 				new TypedValue((int)DxfCode.Start, "INSERT"),
 				new TypedValue((int)DxfCode.Operator, "OR>")
-			};
-			SelectionFilter filter = new SelectionFilter(filterList);
-			PromptSelectionResult selRes = ed.GetSelection(filter);
+			});
 
+			PromptSelectionResult selRes = ed.GetSelection(filter);
 			if (selRes.Status != PromptStatus.OK) return;
 
-			ObjectId[] objectIds = selRes.Value.GetObjectIds();
 			List<TextDataObj> dataList = new List<TextDataObj>();
 
-			// --- BƯỚC 1: ĐỌC DỮ LIỆU ---
+			// 3. Read Data
 			using (Transaction tr = doc.TransactionManager.StartTransaction())
 			{
-				foreach (ObjectId objId in objectIds)
+				foreach (ObjectId objId in selRes.Value.GetObjectIds())
 				{
 					Entity ent = tr.GetObject(objId, OpenMode.ForRead) as Entity;
 					if (ent == null) continue;
 
 					if (ent is DBText dbText)
-						dataList.Add(new TextDataObj { ObjId = objId, OriginalText = dbText.TextString, ObjectType = "TEXT" });
+						dataList.Add(new TextDataObj { ObjId = objId, OriginalText = dbText.TextString });
 					else if (ent is MText mText)
-						dataList.Add(new TextDataObj { ObjId = objId, OriginalText = mText.Contents, ObjectType = "MTEXT" });
+						dataList.Add(new TextDataObj { ObjId = objId, OriginalText = mText.Contents });
 					else if (ent is MLeader mLeader && mLeader.ContentType == ContentType.MTextContent)
-						dataList.Add(new TextDataObj { ObjId = objId, OriginalText = mLeader.MText.Contents, ObjectType = "MLEADER" });
+						dataList.Add(new TextDataObj { ObjId = objId, OriginalText = mLeader.MText.Contents });
 					else if (ent is BlockReference blkRef)
 					{
 						foreach (ObjectId attId in blkRef.AttributeCollection)
 						{
 							AttributeReference attRef = tr.GetObject(attId, OpenMode.ForRead) as AttributeReference;
 							if (attRef != null && !attRef.IsConstant)
-								dataList.Add(new TextDataObj { ObjId = attId, OriginalText = attRef.TextString, ObjectType = "ATTRIB" });
+								dataList.Add(new TextDataObj { ObjId = attId, OriginalText = attRef.TextString });
 						}
 					}
 				}
 				tr.Commit();
 			}
 
-			ed.WriteMessage($"\nStealth Mode: Translating {dataList.Count} objects safely...");
+			ed.WriteMessage($"\nProcessing {dataList.Count} objects (Full Trim & Languages)...");
 
-			// --- BƯỚC 2: DỊCH ---
+			// 4. Translate Process
 			try
 			{
-				using (var client = new HttpClient())
+				using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) })
+				using (SemaphoreSlim semaphore = new SemaphoreSlim(8))
 				{
-					client.Timeout = TimeSpan.FromSeconds(60);
-
-					using (SemaphoreSlim semaphore = new SemaphoreSlim(8))
+					var tasks = dataList.Select(async item =>
 					{
-						var tasks = dataList.Select(async item =>
+						await semaphore.WaitAsync();
+						try
 						{
-							await semaphore.WaitAsync();
-							try
+							MaskResult maskResult = FormatProtector.MaskText(item.OriginalText);
+							if (IsAllTags(maskResult.MaskedText))
 							{
-								MaskResult maskResult = FormatProtector.MaskText(item.OriginalText);
-
-								if (maskResult.MaskedText.Trim().StartsWith("__TAG") && maskResult.MaskedText.Trim().EndsWith("__") && !maskResult.MaskedText.Contains(" "))
-								{
-									item.TranslatedText = item.OriginalText;
-								}
-								else
-								{
-									string trans = await SafeGoogleTranslateApi(client, maskResult.MaskedText, _lastSourceLang, _lastTargetLang);
-									item.TranslatedText = FormatProtector.UnmaskText(trans, maskResult.Codes);
-								}
+								item.TranslatedText = item.OriginalText;
 							}
-							finally
+							else
 							{
-								semaphore.Release();
+								string trans = await SafeGoogleTranslateApi(client, maskResult.MaskedText, _lastSourceLang, _lastTargetLang);
+								item.TranslatedText = FormatProtector.UnmaskText(trans, maskResult.Codes);
 							}
-						});
-
-						await Task.WhenAll(tasks);
-					}
+						}
+						catch { }
+						finally { semaphore.Release(); }
+					});
+					await Task.WhenAll(tasks);
 				}
 			}
 			catch (System.Exception ex)
 			{
-				ed.WriteMessage($"\nConnection Error: {ex.Message}");
+				ed.WriteMessage($"\nError: {ex.Message}");
 				return;
 			}
 
-			// --- BƯỚC 3: GHI DỮ LIỆU ---
+			// 5. Write Data
 			try
 			{
 				using (DocumentLock docLock = doc.LockDocument())
+				using (Transaction tr = doc.TransactionManager.StartTransaction())
 				{
-					using (Transaction tr = doc.TransactionManager.StartTransaction())
+					ObjectId targetStyleId = ObjectId.Null;
+					if (selectedStyleName != "Keep Original")
 					{
-						ObjectId targetStyleId = ObjectId.Null;
-						if (selectedStyleName != "Keep Original")
-						{
-							TextStyleTable tst = (TextStyleTable)tr.GetObject(db.TextStyleTableId, OpenMode.ForRead);
-							if (tst.Has(selectedStyleName))
-								targetStyleId = tst[selectedStyleName];
-						}
-
-						int count = 0;
-						foreach (var item in dataList)
-						{
-							Entity ent = tr.GetObject(item.ObjId, OpenMode.ForWrite) as Entity;
-							if (ent == null) continue;
-
-							if (!string.IsNullOrEmpty(item.TranslatedText) && item.OriginalText != item.TranslatedText)
-							{
-								if (ent is DBText dbText) dbText.TextString = item.TranslatedText;
-								else if (ent is MText mText) mText.Contents = item.TranslatedText;
-								else if (ent is MLeader mLeader)
-								{
-									MText mt = mLeader.MText;
-									mt.Contents = item.TranslatedText;
-									mLeader.MText = mt;
-								}
-								else if (ent is AttributeReference attRef) attRef.TextString = item.TranslatedText;
-								count++;
-							}
-
-							if (targetStyleId != ObjectId.Null)
-							{
-								if (ent is DBText dbText) dbText.TextStyleId = targetStyleId;
-								else if (ent is MText mText) mText.TextStyleId = targetStyleId;
-								else if (ent is MLeader mLeader) mLeader.TextStyleId = targetStyleId;
-								else if (ent is AttributeReference attRef) attRef.TextStyleId = targetStyleId;
-							}
-						}
-						tr.Commit();
-						ed.WriteMessage($"\nDone! Translated {count} objects.");
+						TextStyleTable tst = (TextStyleTable)tr.GetObject(db.TextStyleTableId, OpenMode.ForRead);
+						if (tst.Has(selectedStyleName)) targetStyleId = tst[selectedStyleName];
 					}
+
+					int count = 0;
+					foreach (var item in dataList)
+					{
+						if (string.IsNullOrEmpty(item.TranslatedText) || item.OriginalText == item.TranslatedText) continue;
+
+						Entity ent = tr.GetObject(item.ObjId, OpenMode.ForWrite) as Entity;
+						if (ent == null) continue;
+
+						if (ent is DBText dbText) { dbText.TextString = item.TranslatedText; if (targetStyleId != ObjectId.Null) dbText.TextStyleId = targetStyleId; }
+						else if (ent is MText mText) { mText.Contents = item.TranslatedText; if (targetStyleId != ObjectId.Null) mText.TextStyleId = targetStyleId; }
+						else if (ent is MLeader mLeader)
+						{
+							MText mt = mLeader.MText;
+							mt.Contents = item.TranslatedText;
+							if (targetStyleId != ObjectId.Null) mt.TextStyleId = targetStyleId;
+							mLeader.MText = mt;
+						}
+						else if (ent is AttributeReference attRef) { attRef.TextString = item.TranslatedText; if (targetStyleId != ObjectId.Null) attRef.TextStyleId = targetStyleId; }
+
+						count++;
+					}
+					tr.Commit();
+					ed.WriteMessage($"\nDone! Translated {count} objects.");
 				}
 				ed.Regen();
 			}
-			catch (System.Exception ex)
-			{
-				ed.WriteMessage($"\nWrite Error: {ex.Message}");
-			}
+			catch (System.Exception ex) { ed.WriteMessage($"\nWrite Error: {ex.Message}"); }
+		}
+
+		private bool IsAllTags(string text)
+		{
+			string clean = Regex.Replace(text, @"\[ID:\d+\]", "");
+			return string.IsNullOrWhiteSpace(clean) || Regex.IsMatch(clean, @"^[\d\W]+$");
 		}
 
 		private async Task<string> SafeGoogleTranslateApi(HttpClient client, string input, string sl, string tl)
 		{
 			if (string.IsNullOrWhiteSpace(input)) return input;
-			if (Regex.IsMatch(input, @"^[\d\s\.,-]+$")) return input;
 
-			int maxRetries = 10;
 			int retryDelay = 2000;
-
 			await StealthWebClient.RandomSleep();
 
-			for (int i = 0; i < maxRetries; i++)
+			for (int i = 0; i < 5; i++)
 			{
 				try
 				{
-					var request = new HttpRequestMessage(HttpMethod.Get, $"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={System.Web.HttpUtility.UrlEncode(input)}");
+					var request = new HttpRequestMessage(HttpMethod.Get,
+						$"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={System.Web.HttpUtility.UrlEncode(input)}");
 					request.Headers.Add("User-Agent", StealthWebClient.GetRandomUserAgent());
 
 					HttpResponseMessage response = await client.SendAsync(request);
-
 					if (response.IsSuccessStatusCode)
 					{
-						string jsonResponse = await response.Content.ReadAsStringAsync();
-						return ParseResult(jsonResponse, input);
+						string json = await response.Content.ReadAsStringAsync();
+						// STRICT PARSER (Đã chặn lỗi vivi)
+						return ParseResultStrict(json, input);
 					}
-					else if ((int)response.StatusCode == 429 || (int)response.StatusCode == 503)
+
+					if ((int)response.StatusCode == 429)
 					{
-						await Task.Delay(retryDelay + new Random().Next(0, 1000));
+						await Task.Delay(retryDelay);
 						retryDelay *= 2;
-						continue;
 					}
-					else
-					{
-						return input;
-					}
+					else break;
 				}
-				catch
-				{
-					if (i == maxRetries - 1) return input;
-					await Task.Delay(retryDelay);
-				}
+				catch { await Task.Delay(retryDelay); }
 			}
 			return input;
 		}
 
-		private string ParseResult(string jsonResponse, string original)
+		private string ParseResultStrict(string json, string original)
 		{
 			try
 			{
-				int firstQuote = jsonResponse.IndexOf('"');
-				if (firstQuote == -1) return original;
+				StringBuilder sb = new StringBuilder();
+				int depth = 0;
+				bool inString = false;
+				bool isTransSegment = false;
 
-				int secondQuote = jsonResponse.IndexOf('"', firstQuote + 1);
-				while (secondQuote > 0 && jsonResponse[secondQuote - 1] == '\\')
-					secondQuote = jsonResponse.IndexOf('"', secondQuote + 1);
-
-				if (secondQuote > firstQuote)
+				for (int i = 0; i < json.Length; i++)
 				{
-					string result = jsonResponse.Substring(firstQuote + 1, secondQuote - firstQuote - 1);
-					return Regex.Unescape(result);
+					char c = json[i];
+					if (inString)
+					{
+						if (c == '\\' && i + 1 < json.Length) { i++; continue; }
+						if (c == '"')
+						{
+							inString = false;
+							if (depth == 3 && isTransSegment)
+							{
+								int endContent = i;
+								int startContent = i - 1;
+								while (startContent >= 0)
+								{
+									if (json[startContent] == '"' && (startContent == 0 || json[startContent - 1] != '\\')) break;
+									startContent--;
+								}
+								if (startContent >= 0)
+								{
+									string segment = json.Substring(startContent + 1, endContent - startContent - 1);
+									sb.Append(Regex.Unescape(segment));
+									isTransSegment = false;
+								}
+							}
+						}
+						continue;
+					}
+
+					if (c == '[')
+					{
+						depth++;
+						if (depth == 3) isTransSegment = true;
+					}
+					else if (c == ']')
+					{
+						if (depth == 2) return sb.ToString();
+						depth--;
+					}
+					else if (c == '"')
+					{
+						inString = true;
+					}
 				}
-				return original;
+
+				string res = sb.ToString();
+				return string.IsNullOrWhiteSpace(res) ? original : res;
 			}
 			catch { return original; }
 		}
 	}
 
-	// --- FORM GIAO DIỆN ĐÃ SỬA LỖI ---
-	public class LanguageSelectionForm : WinForms.Form // Dùng Alias WinForms
+	// --- 6. UI FORM ---
+	public class LanguageSelectionForm : Form
 	{
 		public string SelectedSourceCode { get; private set; }
 		public string SelectedTargetCode { get; private set; }
 		public string SelectedTextStyle { get; private set; }
 
-		private WinForms.ComboBox cbSource;
-		private WinForms.ComboBox cbTarget;
-		private WinForms.ComboBox cbStyle;
-
-		private Dictionary<string, string> languages = new Dictionary<string, string>()
-		{
-			{"auto", "Auto detect"}, {"en", "English"}, {"vi", "Vietnamese"}, {"ja", "Japanese"},
-			{"ko", "Korean"}, {"zh-CN", "Chinese (Simplified)"}, {"fr", "French"}, {"ru", "Russian"},
-			{"de", "German"}, {"es", "Spanish"}
-		};
+		private readonly ComboBox cbSource;
+		private readonly ComboBox cbTarget;
+		private readonly ComboBox cbStyle;
 
 		public LanguageSelectionForm(string defaultSource, string defaultTarget, List<string> styleList, string defaultStyle)
 		{
-			this.Text = "Translate Text (Stealth Mode)";
-			this.Size = new Drawing.Size(350, 260); // Sửa lỗi Size
-			this.StartPosition = WinForms.FormStartPosition.CenterScreen;
-			this.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog;
-			this.MaximizeBox = false;
-			this.MinimizeBox = false;
+			this.Text = "Translate Tool (Pro)"; this.Size = new Size(400, 260);
+			this.StartPosition = FormStartPosition.CenterScreen; this.FormBorderStyle = FormBorderStyle.FixedDialog;
+			this.MaximizeBox = false; this.MinimizeBox = false;
 
-			int padding = 20;
-			int lblWidth = 100;
-			int comboWidth = 180;
-			int top = padding;
+			int pad = 20, lblW = 100, cbW = 230, top = 20;
 
-			WinForms.Label lblSource = new WinForms.Label() { Text = "Source Language:", Left = padding, Top = top, Width = lblWidth };
-			this.Controls.Add(lblSource);
-
-			cbSource = new WinForms.ComboBox() { Left = padding + lblWidth, Top = top - 3, Width = comboWidth, DropDownStyle = WinForms.ComboBoxStyle.DropDownList };
-			foreach (var kvp in languages) cbSource.Items.Add(new LangItem(kvp.Key, kvp.Value));
+			this.Controls.Add(new Label { Text = "Source Lang:", Left = pad, Top = top, Width = lblW });
+			cbSource = new ComboBox { Left = pad + lblW, Top = top - 3, Width = cbW, DropDownStyle = ComboBoxStyle.DropDownList };
+			// Load ngôn ngữ từ class Helper
+			foreach (var lang in LanguageList.GetSupportedLanguages()) cbSource.Items.Add(lang);
 			SetComboValue(cbSource, defaultSource);
 			this.Controls.Add(cbSource);
 
 			top += 40;
-
-			WinForms.Label lblTarget = new WinForms.Label() { Text = "Target Language:", Left = padding, Top = top, Width = lblWidth };
-			this.Controls.Add(lblTarget);
-
-			cbTarget = new WinForms.ComboBox() { Left = padding + lblWidth, Top = top - 3, Width = comboWidth, DropDownStyle = WinForms.ComboBoxStyle.DropDownList };
-			foreach (var kvp in languages)
+			this.Controls.Add(new Label { Text = "Target Lang:", Left = pad, Top = top, Width = lblW });
+			cbTarget = new ComboBox { Left = pad + lblW, Top = top - 3, Width = cbW, DropDownStyle = ComboBoxStyle.DropDownList };
+			foreach (var lang in LanguageList.GetSupportedLanguages())
 			{
-				if (kvp.Key != "auto") cbTarget.Items.Add(new LangItem(kvp.Key, kvp.Value));
+				if (lang.Code != "auto") cbTarget.Items.Add(lang);
 			}
 			SetComboValue(cbTarget, defaultTarget);
 			this.Controls.Add(cbTarget);
 
 			top += 40;
-
-			WinForms.Label lblStyle = new WinForms.Label() { Text = "Result Text Style:", Left = padding, Top = top, Width = lblWidth };
-			this.Controls.Add(lblStyle);
-
-			cbStyle = new WinForms.ComboBox() { Left = padding + lblWidth, Top = top - 3, Width = comboWidth, DropDownStyle = WinForms.ComboBoxStyle.DropDownList };
-			foreach (string st in styleList) cbStyle.Items.Add(st);
-
-			if (cbStyle.Items.Contains(defaultStyle)) cbStyle.SelectedItem = defaultStyle;
-			else cbStyle.SelectedIndex = 0;
-
+			this.Controls.Add(new Label { Text = "Text Style:", Left = pad, Top = top, Width = lblW });
+			cbStyle = new ComboBox { Left = pad + lblW, Top = top - 3, Width = cbW, DropDownStyle = ComboBoxStyle.DropDownList };
+			foreach (string s in styleList) cbStyle.Items.Add(s);
+			if (cbStyle.Items.Contains(defaultStyle)) cbStyle.SelectedItem = defaultStyle; else cbStyle.SelectedIndex = 0;
 			this.Controls.Add(cbStyle);
 
 			top += 50;
-
-			WinForms.Button btnOk = new WinForms.Button() { Text = "Translate", Left = 120, Top = top, DialogResult = WinForms.DialogResult.OK, Width = 90, Height = 30 };
+			Button btnOk = new Button { Text = "Translate", Left = 130, Top = top, DialogResult = DialogResult.OK, Width = 100 };
 			btnOk.Click += (s, e) => {
-				SelectedSourceCode = ((LangItem)cbSource.SelectedItem).Code;
-				SelectedTargetCode = ((LangItem)cbTarget.SelectedItem).Code;
+				SelectedSourceCode = ((LanguageItem)cbSource.SelectedItem).Code;
+				SelectedTargetCode = ((LanguageItem)cbTarget.SelectedItem).Code;
 				SelectedTextStyle = cbStyle.SelectedItem.ToString();
 			};
 			this.Controls.Add(btnOk);
 
-			WinForms.Button btnCancel = new WinForms.Button() { Text = "Cancel", Left = 220, Top = top, DialogResult = WinForms.DialogResult.Cancel, Width = 90, Height = 30 };
+			Button btnCancel = new Button { Text = "Cancel", Left = 240, Top = top, DialogResult = DialogResult.Cancel, Width = 100 };
 			this.Controls.Add(btnCancel);
 		}
 
-		private void SetComboValue(WinForms.ComboBox cb, string code)
+		private void SetComboValue(ComboBox cb, string code)
 		{
-			foreach (LangItem item in cb.Items)
-			{
-				if (item.Code == code) { cb.SelectedItem = item; break; }
-			}
-			if (cb.SelectedIndex == -1 && cb.Items.Count > 0) cb.SelectedIndex = 0;
-		}
-
-		private class LangItem
-		{
-			public string Code { get; set; }
-			public string Name { get; set; }
-			public LangItem(string code, string name) { Code = code; Name = name; }
-			public override string ToString() { return Name; }
+			foreach (LanguageItem item in cb.Items) if (item.Code == code) { cb.SelectedItem = item; return; }
+			if (cb.Items.Count > 0) cb.SelectedIndex = 0;
 		}
 	}
 }
