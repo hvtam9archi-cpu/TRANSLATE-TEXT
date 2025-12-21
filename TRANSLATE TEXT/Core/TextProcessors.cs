@@ -3,14 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using HoangTam.AutoCAD.Tools.Models;
 
 namespace HoangTam.AutoCAD.Tools.Core
 {
-    public class MaskResult
-    {
-        public string MaskedText { get; set; }
-        public List<string> Codes { get; set; } = new List<string>();
-    }
+    public enum EncodingType { Auto = 0, Unicode = 1, VNI = 2, TCVN3 = 3 }
 
     public static class FormatProtector
     {
@@ -68,8 +65,6 @@ namespace HoangTam.AutoCAD.Tools.Core
             return string.IsNullOrWhiteSpace(clean) || Regex.IsMatch(clean, @"^[\d\W]+$");
         }
     }
-
-    public enum EncodingType { Auto = 0, Unicode = 1, VNI = 2, TCVN3 = 3 }
 
     public static class VnCharset
     {

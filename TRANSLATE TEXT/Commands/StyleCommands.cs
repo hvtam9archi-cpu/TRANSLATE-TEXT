@@ -23,6 +23,7 @@ namespace HoangTam.AutoCAD.Tools.Commands
 
             try
             {
+                // 1. Load Styles
                 List<string> styleList = new List<string>();
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
@@ -38,8 +39,8 @@ namespace HoangTam.AutoCAD.Tools.Commands
 
                 if (styleList.Count == 0) { ed.WriteMessage("\nNo Text Style found!"); return; }
 
+                // 2. UI
                 AppSettings.LoadStyleSettings(out string savedStyle, out int savedTgtIdx, out int savedSrcIdx);
-
                 string targetStyleName;
                 EncodingType srcEnc, tgtEnc;
                 int selectedTgtIdx, selectedSrcIdx;
@@ -53,17 +54,15 @@ namespace HoangTam.AutoCAD.Tools.Commands
                     selectedTgtIdx = form.SelectedTargetIndex;
                     selectedSrcIdx = form.SelectedSourceIndex;
                 }
-
                 AppSettings.SaveStyleSettings(targetStyleName, selectedTgtIdx, selectedSrcIdx);
 
+                // 3. Selection
                 PromptSelectionOptions pso = new PromptSelectionOptions { MessageForAdding = "\nSelect Text/Block to Change Style:" };
                 PromptSelectionResult psr = ed.GetSelection(pso);
                 if (psr.Status != PromptStatus.OK) return;
 
-                HashSet<ObjectId> processedBlockDefs = new HashSet<ObjectId>();
-                HashSet<ObjectId> processedIds = new HashSet<ObjectId>();
+                // 4. Process & Write (Combined for speed since no network IO)
                 int count = 0;
-
                 using (DocumentLock docLock = doc.LockDocument())
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
@@ -74,19 +73,21 @@ namespace HoangTam.AutoCAD.Tools.Commands
                         targetStyleId = tst[targetStyleName];
                     }
 
-                    foreach (SelectedObject so in psr.Value)
+                    HashSet<ObjectId> processedBlockDefs = new HashSet<ObjectId>();
+                    foreach (ObjectId objId in psr.Value.GetObjectIds())
                     {
-                        Entity ent = tr.GetObject(so.ObjectId, OpenMode.ForWrite) as Entity;
+                        Entity ent = tr.GetObject(objId, OpenMode.ForWrite) as Entity;
                         if (ent == null) continue;
 
                         if (ent is BlockReference blkRef)
                         {
+                            // Process Attributes
                             foreach (ObjectId attId in blkRef.AttributeCollection)
                             {
                                 var att = tr.GetObject(attId, OpenMode.ForWrite) as Entity;
-                                if (ProcessSingleEntity(att, targetStyleId, srcEnc, tgtEnc, processedIds)) count++;
+                                if (ProcessEntity(att, targetStyleId, srcEnc, tgtEnc)) count++;
                             }
-
+                            // Process Block Def
                             ObjectId btrId = blkRef.BlockTableRecord;
                             if (!processedBlockDefs.Contains(btrId))
                             {
@@ -95,13 +96,13 @@ namespace HoangTam.AutoCAD.Tools.Commands
                                 foreach (ObjectId subId in btr)
                                 {
                                     var subEnt = tr.GetObject(subId, OpenMode.ForWrite) as Entity;
-                                    ProcessSingleEntity(subEnt, targetStyleId, srcEnc, tgtEnc, processedIds);
+                                    ProcessEntity(subEnt, targetStyleId, srcEnc, tgtEnc);
                                 }
                             }
                         }
                         else
                         {
-                            if (ProcessSingleEntity(ent, targetStyleId, srcEnc, tgtEnc, processedIds)) count++;
+                            if (ProcessEntity(ent, targetStyleId, srcEnc, tgtEnc)) count++;
                         }
                     }
                     tr.Commit();
@@ -116,15 +117,15 @@ namespace HoangTam.AutoCAD.Tools.Commands
             }
         }
 
-        private bool ProcessSingleEntity(Entity ent, ObjectId styleId, EncodingType src, EncodingType tgt, HashSet<ObjectId> processedIds)
+        private bool ProcessEntity(Entity ent, ObjectId styleId, EncodingType src, EncodingType tgt)
         {
-            if (ent == null || processedIds.Contains(ent.ObjectId)) return false;
+            if (ent == null) return false;
 
+            // Clean MText formatting before conversion
             string originalText = ent.GetTextContent();
             if (originalText == null) return false;
 
-            // Fix lỗi ambiguous ContentType ở đây bằng namespace đầy đủ
-            if (ent is MText || (ent is MLeader ml && ml.ContentType == Autodesk.AutoCAD.DatabaseServices.ContentType.MTextContent))
+            if (ent is MText || (ent is MLeader ml && ml.ContentType == ContentType.MTextContent))
             {
                 originalText = Regex.Replace(originalText, @"\\[Ff][^;]*;", "");
                 originalText = Regex.Replace(originalText, @"\\?U\+([0-9A-Fa-f]{4})",
@@ -132,10 +133,14 @@ namespace HoangTam.AutoCAD.Tools.Commands
             }
 
             string convertedText = VnCharset.Convert(originalText, src, tgt);
-            ent.SetTextContent(convertedText, styleId != ObjectId.Null ? styleId : (ObjectId?)null);
 
-            processedIds.Add(ent.ObjectId);
-            return true;
+            // Chỉ set nếu có thay đổi hoặc cần đổi style
+            if (convertedText != originalText || styleId != ObjectId.Null)
+            {
+                ent.SetTextContent(convertedText, styleId);
+                return true;
+            }
+            return false;
         }
     }
 }
