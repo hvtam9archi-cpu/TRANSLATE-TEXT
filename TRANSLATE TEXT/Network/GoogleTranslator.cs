@@ -30,7 +30,13 @@ namespace HoangTam.AutoCAD.Tools.Network
         {
             if (string.IsNullOrWhiteSpace(input)) return input;
 
-            var maskResult = FormatProtector.MaskText(input);
+            // --- SỬA ĐỔI: Luôn gọi Dictionary xử lý trước ---
+            // AecGlobalDictionary giờ đã đủ thông minh để xử lý "auto"
+            string textToProcess = AecGlobalDictionary.ApplyTerminology(input, sl, tl);
+            // ------------------------------------------------
+
+            // MASKING
+            var maskResult = FormatProtector.MaskText(textToProcess);
             if (FormatProtector.IsAllTags(maskResult.MaskedText)) return input;
 
             string textToTranslate = maskResult.MaskedText;
@@ -49,6 +55,8 @@ namespace HoangTam.AutoCAD.Tools.Network
                     {
                         string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                         string translatedRaw = ParseResultStrict(json, textToTranslate);
+
+                        // 3. UNMASKING (Khôi phục mã AutoCAD)
                         return FormatProtector.UnmaskText(translatedRaw, maskResult.Codes);
                     }
 

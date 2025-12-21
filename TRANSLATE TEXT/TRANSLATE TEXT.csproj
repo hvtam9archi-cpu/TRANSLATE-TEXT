@@ -116,6 +116,7 @@
   <ItemGroup>
     <Compile Include="Commands\StyleCommands.cs" />
     <Compile Include="Commands\TranslateCommands.cs" />
+    <Compile Include="Core\AecGlobalDictionary.cs" />
     <Compile Include="Core\AppSettings.cs" />
     <Compile Include="Core\TextUtils.cs" />
     <Compile Include="Extensions\EntityExtensions.cs" />
