@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" AppVersion="1.0.0" Name="Translate Text Plugin" ProductCode="{F5001958-60FF-47FD-8DA3-BA8409511970}">
+  <CompanyDetails Name="TH Tools" Url="https://yourwebsite.com" />
+  <Components>
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R24.0" SeriesMax="R24.3" />
+    <ComponentEntry AppName="TranslateText" Version="1.0" ModuleName="./Contents/TranslateText.dll" AppDescription="AutoCAD Translate &amp; Change Text Style Plugin" LoadOnCommandInvocation="True" LoadOnAutoCADStartup="True">
+      <Commands GroupName="TRANSLATE_GROUP">
+        <Command Local="TRANSLATETEXT" Global="TRANSLATETEXT" />
+        <Command Local="CHANGETEXTSTYLE" Global="CHANGETEXTSTYLE" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>
