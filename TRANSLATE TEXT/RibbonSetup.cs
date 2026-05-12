@@ -79,7 +79,7 @@ namespace TranslateText
                         Orientation = System.Windows.Controls.Orientation.Vertical,
                         LargeImage = GenerateIcon("TT", 32),
                         Image = GenerateIcon("TT", 16),
-                        CommandParameter = "\x1B\x1BTRANSLATETEXT ",
+                        CommandParameter = "TRANSLATETEXT",
                         CommandHandler = commandHandler
                     };
 
@@ -93,7 +93,7 @@ namespace TranslateText
                         Orientation = System.Windows.Controls.Orientation.Vertical,
                         LargeImage = GenerateIcon("CS", 32),
                         Image = GenerateIcon("CS", 16),
-                        CommandParameter = "\x1B\x1BCHANGETEXTSTYLE ",
+                        CommandParameter = "CHANGETEXTSTYLE",
                         CommandHandler = commandHandler
                     };
 
@@ -183,10 +183,15 @@ namespace TranslateText
 
         public void Execute(object parameter)
         {
-            if (parameter is RibbonButton button && button.CommandParameter != null)
+            if (parameter is RibbonButton button && button.CommandParameter is string commandName)
             {
                 Document doc = Application.DocumentManager.MdiActiveDocument;
-                doc?.SendStringToExecute((string)button.CommandParameter, true, false, true);
+                if (doc == null) return;
+
+                // Hủy lệnh đang chạy (nếu có), sau đó gửi tên lệnh riêng biệt
+                // Tách riêng cancel và command name để tránh bị nuốt ký tự đầu
+                doc.SendStringToExecute("\x1B\x1B", true, false, false);
+                doc.SendStringToExecute(commandName + "\n", true, false, false);
             }
         }
     }

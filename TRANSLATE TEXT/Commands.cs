@@ -29,6 +29,8 @@ namespace TranslateText
         private static string _lastSourceLang = "auto";
         private static string _lastTargetLang = "vi";
         private static string _lastTextStyle = "Keep Original";
+        private static TextCaseOption _lastTranslateTextCase = TextCaseOption.None;
+        private static TextCaseOption _lastChangeStyleTextCase = TextCaseOption.None;
 
         // ========================================================================================
         // LỆNH 1: TRANSLATETEXT — Dịch thuật text trong bản vẽ AutoCAD
@@ -59,13 +61,14 @@ namespace TranslateText
 
                 // 2. Hiển thị WPF Dialog
                 string selectedStyleName;
-                var window = new TranslateWindow(_lastSourceLang, _lastTargetLang, styleNames, _lastTextStyle);
+                var window = new TranslateWindow(_lastSourceLang, _lastTargetLang, styleNames, _lastTextStyle, _lastTranslateTextCase);
                 AcApp.ShowModalWindow(window);
 
                 if (!window.IsConfirmed) return;
                 _lastSourceLang = window.SelectedSourceCode;
                 _lastTargetLang = window.SelectedTargetCode;
                 _lastTextStyle = window.SelectedTextStyle;
+                _lastTranslateTextCase = window.SelectedTextCase;
                 selectedStyleName = window.SelectedTextStyle;
 
                 // 3. Chọn đối tượng Text/MText/MLeader/Block
@@ -144,8 +147,9 @@ namespace TranslateText
                 {
                     var tasks = dataList.Select(async item =>
                     {
-                        item.ProcessedText = await TranslationService.ProcessAsync(
+                        string translated = await TranslationService.ProcessAsync(
                             item.OriginalText, _lastSourceLang, _lastTargetLang, semaphore);
+                        item.ProcessedText = TextCaseHelper.ApplyCaseSafe(translated, _lastTranslateTextCase);
                     });
                     await Task.WhenAll(tasks);
                 }
@@ -252,7 +256,7 @@ namespace TranslateText
                 // 2. Hiển thị WPF Dialog
                 AppSettings.Load(out string savedStyle, out int savedTgt, out int savedSrc);
 
-                var window = new ChangeStyleWindow(styleList, savedStyle, savedTgt, savedSrc);
+                var window = new ChangeStyleWindow(styleList, savedStyle, savedTgt, savedSrc, _lastChangeStyleTextCase);
                 AcApp.ShowModalWindow(window);
 
                 if (!window.IsConfirmed) return;
@@ -260,6 +264,7 @@ namespace TranslateText
                 string targetStyleName = window.TargetStyle;
                 EncodingType sourceEncoding = window.SourceEncoding;
                 EncodingType targetEncoding = window.TargetEncoding;
+                _lastChangeStyleTextCase = window.SelectedTextCase;
                 AppSettings.Save(targetStyleName, window.SelectedTargetIndex, window.SelectedSourceIndex);
 
                 // 3. Chọn đối tượng
@@ -288,7 +293,7 @@ namespace TranslateText
                             if (entity == null) continue;
 
                             // Xử lý entity trực tiếp + Attributes
-                            if (ProcessEntity(entity, targetStyleId, sourceEncoding, targetEncoding, transaction))
+                            if (ProcessEntity(entity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction))
                                 processedCount++;
 
                             // Xử lý Block Definition (1 lần mỗi loại block)
@@ -303,7 +308,7 @@ namespace TranslateText
                                     {
                                         Entity subEntity = transaction.GetObject(subId, OpenMode.ForWrite) as Entity;
                                         if (subEntity != null)
-                                            ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, transaction);
+                                            ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction);
                                     }
                                 }
                             }
@@ -325,7 +330,7 @@ namespace TranslateText
         /// Xử lý từng Entity: Đổi TextStyle + Chuyển đổi encoding.
         /// Hỗ trợ DBText, MText, MLeader, BlockReference (Attributes), Dimension, AttributeDefinition.
         /// </summary>
-        private bool ProcessEntity(Entity entity, ObjectId styleId, EncodingType sourceEncoding, EncodingType targetEncoding, Transaction transaction)
+        private bool ProcessEntity(Entity entity, ObjectId styleId, EncodingType sourceEncoding, EncodingType targetEncoding, TextCaseOption textCase, Transaction transaction)
         {
             if (_processedIds.Contains(entity.ObjectId)) return false;
 
@@ -336,7 +341,7 @@ namespace TranslateText
                 if (entity is DBText dbText)
                 {
                     dbText.TextStyleId = styleId;
-                    dbText.TextString = VnCharset.Convert(dbText.TextString, sourceEncoding, targetEncoding);
+                    dbText.TextString = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(dbText.TextString, sourceEncoding, targetEncoding), textCase);
                     _processedIds.Add(entity.ObjectId);
                     return true;
                 }
@@ -347,7 +352,7 @@ namespace TranslateText
                     string content = Regex.Replace(mText.Contents, @"\\[Ff][^;]*;", "");
                     content = Regex.Replace(content, @"\\?U\+([0-9A-Fa-f]{4})", m =>
                         ((char)int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber)).ToString());
-                    mText.Contents = VnCharset.Convert(content, sourceEncoding, targetEncoding);
+                    mText.Contents = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
                     _processedIds.Add(entity.ObjectId);
                     return true;
                 }
@@ -358,7 +363,7 @@ namespace TranslateText
                     string content = Regex.Replace(leaderText.Contents, @"\\[Ff][^;]*;", "");
                     content = Regex.Replace(content, @"\\?U\+([0-9A-Fa-f]{4})", m =>
                         ((char)int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber)).ToString());
-                    leaderText.Contents = VnCharset.Convert(content, sourceEncoding, targetEncoding);
+                    leaderText.Contents = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
                     mLeader.MText = leaderText;
                     mLeader.TextStyleId = styleId;
                     _processedIds.Add(entity.ObjectId);
@@ -373,7 +378,7 @@ namespace TranslateText
                         if (attRef != null && !_processedIds.Contains(attId))
                         {
                             attRef.TextStyleId = styleId;
-                            attRef.TextString = VnCharset.Convert(attRef.TextString, sourceEncoding, targetEncoding);
+                            attRef.TextString = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(attRef.TextString, sourceEncoding, targetEncoding), textCase);
                             _processedIds.Add(attId);
                             hasAttribute = true;
                         }
@@ -385,14 +390,14 @@ namespace TranslateText
                 {
                     dimension.DimensionStyle = styleId;
                     if (!string.IsNullOrEmpty(dimension.DimensionText))
-                        dimension.DimensionText = VnCharset.Convert(dimension.DimensionText, sourceEncoding, targetEncoding);
+                        dimension.DimensionText = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(dimension.DimensionText, sourceEncoding, targetEncoding), textCase);
                     _processedIds.Add(entity.ObjectId);
                     return true;
                 }
                 else if (entity is AttributeDefinition attDef)
                 {
                     attDef.TextStyleId = styleId;
-                    attDef.TextString = VnCharset.Convert(attDef.TextString, sourceEncoding, targetEncoding);
+                    attDef.TextString = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(attDef.TextString, sourceEncoding, targetEncoding), textCase);
                     _processedIds.Add(entity.ObjectId);
                     return true;
                 }

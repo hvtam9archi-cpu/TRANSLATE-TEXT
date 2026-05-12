@@ -12,9 +12,10 @@ namespace TranslateText.UI
         public EncodingType SourceEncoding { get; private set; }
         public int SelectedTargetIndex => cbTargetEncoding.SelectedIndex;
         public int SelectedSourceIndex => cbSourceEncoding.SelectedIndex;
+        public TranslateText.Core.TextCaseOption SelectedTextCase { get; private set; }
         public bool IsConfirmed { get; private set; }
 
-        public ChangeStyleWindow(List<string> styleNames, string savedStyle, int savedTgtIdx, int savedSrcIdx)
+        public ChangeStyleWindow(List<string> styleNames, string savedStyle, int savedTgtIdx, int savedSrcIdx, TranslateText.Core.TextCaseOption defaultTextCase)
         {
             InitializeComponent();
 
@@ -44,22 +45,14 @@ namespace TranslateText.UI
             cbSourceEncoding.Items.Add("TCVN3 (ABC)");
             cbSourceEncoding.SelectedIndex = (savedSrcIdx >= 0 && savedSrcIdx < cbSourceEncoding.Items.Count) ? savedSrcIdx : 0;
 
-            // Apply ComboBox styling
-            ApplyComboBoxStyle(cbTargetStyle);
-            ApplyComboBoxStyle(cbTargetEncoding);
-            ApplyComboBoxStyle(cbSourceEncoding);
-        }
-
-        private void ApplyComboBoxStyle(System.Windows.Controls.ComboBox cb)
-        {
-            cb.Background = new System.Windows.Media.SolidColorBrush(
-                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#2B2D32"));
-            cb.Foreground = new System.Windows.Media.SolidColorBrush(
-                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#E8EAED"));
-            cb.BorderBrush = new System.Windows.Media.SolidColorBrush(
-                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#333640"));
-            cb.FontFamily = new System.Windows.Media.FontFamily("Segoe UI");
-            cb.FontSize = 12;
+            // Populate Text Case
+            cbTextCase.Items.Add("Keep Original (None)");
+            cbTextCase.Items.Add("Sentence case");
+            cbTextCase.Items.Add("lowercase");
+            cbTextCase.Items.Add("UPPERCASE");
+            cbTextCase.Items.Add("Title Case");
+            cbTextCase.Items.Add("tOGGLE cASE");
+            cbTextCase.SelectedIndex = (int)defaultTextCase;
         }
 
         private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -91,6 +84,8 @@ namespace TranslateText.UI
 
             // Source: Index 0 = Auto(0), Index 1 = Unicode(1), Index 2 = VNI(2), Index 3 = TCVN3(3)
             SourceEncoding = (EncodingType)cbSourceEncoding.SelectedIndex;
+
+            SelectedTextCase = (TranslateText.Core.TextCaseOption)cbTextCase.SelectedIndex;
 
             IsConfirmed = true;
             Close();
