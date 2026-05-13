@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.AutoCAD.ApplicationServices;
@@ -219,8 +218,6 @@ namespace TranslateText
         // LỆNH 2: CHANGETEXTSTYLE — Chuyển đổi mã font tiếng Việt (Unicode/VNI/TCVN3)
         // ========================================================================================
 
-        private HashSet<ObjectId> _processedIds;
-
         [CommandMethod("CHANGETEXTSTYLE")]
         public void ChangeTextStyleCmd()
         {
@@ -228,7 +225,6 @@ namespace TranslateText
             if (doc == null) return;
             Database database = doc.Database;
             Editor editor = doc.Editor;
-            _processedIds = new HashSet<ObjectId>();
 
             try
             {
@@ -275,7 +271,8 @@ namespace TranslateText
                 PromptSelectionResult selectionResult = editor.GetSelection(selectionOptions);
                 if (selectionResult.Status != PromptStatus.OK) return;
 
-                // 4. Xử lý
+                // 4. Xử lý — delegate logic sang TextStyleLogic
+                var logic = new TextStyleLogic();
                 HashSet<ObjectId> processedBlockDefs = new HashSet<ObjectId>();
 
                 using (Transaction transaction = database.TransactionManager.StartTransaction())
@@ -293,7 +290,7 @@ namespace TranslateText
                             if (entity == null) continue;
 
                             // Xử lý entity trực tiếp + Attributes
-                            if (ProcessEntity(entity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction))
+                            if (logic.ProcessEntity(entity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction))
                                 processedCount++;
 
                             // Xử lý Block Definition (1 lần mỗi loại block)
@@ -308,7 +305,7 @@ namespace TranslateText
                                     {
                                         Entity subEntity = transaction.GetObject(subId, OpenMode.ForWrite) as Entity;
                                         if (subEntity != null)
-                                            ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction);
+                                            logic.ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction);
                                     }
                                 }
                             }
@@ -324,90 +321,6 @@ namespace TranslateText
             {
                 editor.WriteMessage($"\n[ChangeTextStyle] Error: {ex.Message}");
             }
-        }
-
-        /// <summary>
-        /// Xử lý từng Entity: Đổi TextStyle + Chuyển đổi encoding.
-        /// Hỗ trợ DBText, MText, MLeader, BlockReference (Attributes), Dimension, AttributeDefinition.
-        /// </summary>
-        private bool ProcessEntity(Entity entity, ObjectId styleId, EncodingType sourceEncoding, EncodingType targetEncoding, TextCaseOption textCase, Transaction transaction)
-        {
-            if (_processedIds.Contains(entity.ObjectId)) return false;
-
-            try
-            {
-                if (!entity.IsWriteEnabled) entity.UpgradeOpen();
-
-                if (entity is DBText dbText)
-                {
-                    dbText.TextStyleId = styleId;
-                    dbText.TextString = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(dbText.TextString, sourceEncoding, targetEncoding), textCase);
-                    _processedIds.Add(entity.ObjectId);
-                    return true;
-                }
-                else if (entity is MText mText)
-                {
-                    mText.TextStyleId = styleId;
-                    // Remove font override để áp dụng style mới
-                    string content = Regex.Replace(mText.Contents, @"\\[Ff][^;]*;", "");
-                    content = Regex.Replace(content, @"\\?U\+([0-9A-Fa-f]{4})", m =>
-                        ((char)int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber)).ToString());
-                    mText.Contents = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
-                    _processedIds.Add(entity.ObjectId);
-                    return true;
-                }
-                else if (entity is MLeader mLeader && mLeader.ContentType == ContentType.MTextContent)
-                {
-                    MText leaderText = mLeader.MText;
-                    leaderText.TextStyleId = styleId;
-                    string content = Regex.Replace(leaderText.Contents, @"\\[Ff][^;]*;", "");
-                    content = Regex.Replace(content, @"\\?U\+([0-9A-Fa-f]{4})", m =>
-                        ((char)int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber)).ToString());
-                    leaderText.Contents = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
-                    mLeader.MText = leaderText;
-                    mLeader.TextStyleId = styleId;
-                    _processedIds.Add(entity.ObjectId);
-                    return true;
-                }
-                else if (entity is BlockReference blockRef)
-                {
-                    bool hasAttribute = false;
-                    foreach (ObjectId attId in blockRef.AttributeCollection)
-                    {
-                        AttributeReference attRef = transaction.GetObject(attId, OpenMode.ForWrite) as AttributeReference;
-                        if (attRef != null && !_processedIds.Contains(attId))
-                        {
-                            attRef.TextStyleId = styleId;
-                            attRef.TextString = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(attRef.TextString, sourceEncoding, targetEncoding), textCase);
-                            _processedIds.Add(attId);
-                            hasAttribute = true;
-                        }
-                    }
-                    _processedIds.Add(entity.ObjectId);
-                    return hasAttribute;
-                }
-                else if (entity is Dimension dimension)
-                {
-                    dimension.DimensionStyle = styleId;
-                    if (!string.IsNullOrEmpty(dimension.DimensionText))
-                        dimension.DimensionText = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(dimension.DimensionText, sourceEncoding, targetEncoding), textCase);
-                    _processedIds.Add(entity.ObjectId);
-                    return true;
-                }
-                else if (entity is AttributeDefinition attDef)
-                {
-                    attDef.TextStyleId = styleId;
-                    attDef.TextString = TextCaseHelper.ApplyCaseSafe(VnCharset.Convert(attDef.TextString, sourceEncoding, targetEncoding), textCase);
-                    _processedIds.Add(entity.ObjectId);
-                    return true;
-                }
-            }
-            catch (System.Exception ex)
-            {
-                // Log nhưng không crash toàn bộ lệnh
-                AcApp.DocumentManager.MdiActiveDocument?.Editor.WriteMessage($"\n[ProcessEntity] Warning: {ex.Message}");
-            }
-            return false;
         }
     }
 }

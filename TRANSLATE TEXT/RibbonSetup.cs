@@ -17,26 +17,43 @@ namespace TranslateText
         private const string TabTitle = "TH Tools";
         private const string PanelId = "TRANSLATE_TEXT_PANEL";
 
-        private static bool _isLoaded = false;
-
         public void Initialize()
         {
-            // Đăng ký event để chờ Ribbon sẵn sàng
-            Application.Idle += OnIdle;
+            // Đăng ký Idle để chờ Ribbon sẵn sàng
+            Application.Idle += Application_Idle;
+            // Đăng ký SystemVariableChanged để bắt đổi Workspace → vẽ lại Ribbon
+            Application.SystemVariableChanged += Application_SystemVariableChanged;
         }
 
-        public void Terminate() { }
-
-        private void OnIdle(object sender, EventArgs e)
+        public void Terminate()
         {
-            Application.Idle -= OnIdle;
-            CreateRibbon();
+            // Hủy đăng ký event khi unload plugin
+            Application.Idle -= Application_Idle;
+            Application.SystemVariableChanged -= Application_SystemVariableChanged;
+        }
+
+        private void Application_Idle(object sender, EventArgs e)
+        {
+            // Chỉ gọi CreateRibbon khi Ribbon đã sẵn sàng
+            if (ComponentManager.Ribbon != null)
+            {
+                Application.Idle -= Application_Idle;
+                CreateRibbon();
+            }
+        }
+
+        private void Application_SystemVariableChanged(object sender, SystemVariableChangedEventArgs e)
+        {
+            // Khi đổi Workspace (WSCURRENT), vẽ lại Ribbon nếu cần
+            if (e.Name.Equals("WSCURRENT", StringComparison.OrdinalIgnoreCase)
+                && ComponentManager.Ribbon != null)
+            {
+                CreateRibbon();
+            }
         }
 
         private void CreateRibbon()
         {
-            if (_isLoaded) return;
-
             try
             {
                 RibbonControl ribbon = ComponentManager.Ribbon;
@@ -50,61 +67,52 @@ namespace TranslateText
                     ribbon.Tabs.Add(tab);
                 }
 
-                // 2. Kiểm tra Panel đã tồn tại chưa (tránh duplicate khi NETLOAD lại)
-                bool panelExists = false;
+                // 2. Kiểm tra Panel đã tồn tại chưa (tránh duplicate khi NETLOAD lại hoặc đổi Workspace)
                 foreach (RibbonPanel existingPanel in tab.Panels)
                 {
                     if (existingPanel.Source.Id == PanelId)
-                    {
-                        panelExists = true;
-                        break;
-                    }
+                        return; // Panel đã có, không cần tạo lại
                 }
 
-                if (!panelExists)
+                // 3. Tạo Panel "Text Tools"
+                RibbonPanelSource panelSource = new RibbonPanelSource { Title = "Text Tools", Id = PanelId };
+                RibbonPanel panel = new RibbonPanel { Source = panelSource };
+
+                var commandHandler = new TranslateRibbonCommandHandler();
+
+                // 4. Button "Translate Text" — Nút lớn (Large) với icon
+                RibbonButton btnTranslate = new RibbonButton
                 {
-                    // 3. Tạo Panel "Text Tools"
-                    RibbonPanelSource panelSource = new RibbonPanelSource { Title = "Text Tools", Id = PanelId };
-                    RibbonPanel panel = new RibbonPanel { Source = panelSource };
+                    Text = "\nTranslate\nText",
+                    ShowText = true,
+                    ShowImage = true,
+                    Size = RibbonItemSize.Large,
+                    Orientation = System.Windows.Controls.Orientation.Vertical,
+                    LargeImage = GenerateIcon("TT", 32),
+                    Image = GenerateIcon("TT", 16),
+                    CommandParameter = "TRANSLATETEXT",
+                    CommandHandler = commandHandler
+                };
 
-                    var commandHandler = new TranslateRibbonCommandHandler();
+                // 5. Button "Change Style" — Nút lớn (Large) với icon
+                RibbonButton btnChangeStyle = new RibbonButton
+                {
+                    Text = "\nChange\nStyle",
+                    ShowText = true,
+                    ShowImage = true,
+                    Size = RibbonItemSize.Large,
+                    Orientation = System.Windows.Controls.Orientation.Vertical,
+                    LargeImage = GenerateIcon("CS", 32),
+                    Image = GenerateIcon("CS", 16),
+                    CommandParameter = "CHANGETEXTSTYLE",
+                    CommandHandler = commandHandler
+                };
 
-                    // 4. Button "Translate Text" — Nút lớn (Large) với icon
-                    RibbonButton btnTranslate = new RibbonButton
-                    {
-                        Text = "\nTranslate\nText",
-                        ShowText = true,
-                        ShowImage = true,
-                        Size = RibbonItemSize.Large,
-                        Orientation = System.Windows.Controls.Orientation.Vertical,
-                        LargeImage = GenerateIcon("TT", 32),
-                        Image = GenerateIcon("TT", 16),
-                        CommandParameter = "TRANSLATETEXT",
-                        CommandHandler = commandHandler
-                    };
+                // 6. Thêm các button vào Panel
+                panelSource.Items.Add(btnTranslate);
+                panelSource.Items.Add(btnChangeStyle);
 
-                    // 5. Button "Change Style" — Nút lớn (Large) với icon
-                    RibbonButton btnChangeStyle = new RibbonButton
-                    {
-                        Text = "\nChange\nStyle",
-                        ShowText = true,
-                        ShowImage = true,
-                        Size = RibbonItemSize.Large,
-                        Orientation = System.Windows.Controls.Orientation.Vertical,
-                        LargeImage = GenerateIcon("CS", 32),
-                        Image = GenerateIcon("CS", 16),
-                        CommandParameter = "CHANGETEXTSTYLE",
-                        CommandHandler = commandHandler
-                    };
-
-                    // 6. Thêm các button vào Panel
-                    panelSource.Items.Add(btnTranslate);
-                    panelSource.Items.Add(btnChangeStyle);
-
-                    tab.Panels.Add(panel);
-                }
-
-                _isLoaded = true;
+                tab.Panels.Add(panel);
                 tab.IsActive = true;
             }
             catch (System.Exception ex)
