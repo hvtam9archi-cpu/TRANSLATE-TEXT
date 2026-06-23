@@ -27,6 +27,8 @@
     <Copy SourceFiles="@(ReferenceCopyLocalPaths)" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(ProjectDir)\PackageContents.xml" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)\Resource\IconRibbon_TranslateText_32px.ico" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\Resource" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)\Resource\IconRibbon_TranslateText_32px.png" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\Resource" SkipUnchangedFiles="false" />
   </Target>
 
 </Project>

@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Reflection;
 using System.Windows.Input;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
@@ -80,7 +82,7 @@ namespace TranslateText
 
                 var commandHandler = new TranslateRibbonCommandHandler();
 
-                // 4. Button "Translate Text" — Nút lớn (Large) với icon
+                // 4. Button "Translate Text" — Nút lớn (Large) với icon từ file .ico
                 RibbonButton btnTranslate = new RibbonButton
                 {
                     Text = "\nTranslate\nText",
@@ -88,8 +90,8 @@ namespace TranslateText
                     ShowImage = true,
                     Size = RibbonItemSize.Large,
                     Orientation = System.Windows.Controls.Orientation.Vertical,
-                    LargeImage = GenerateIcon("TT", 32),
-                    Image = GenerateIcon("TT", 16),
+                    LargeImage = LoadRibbonIcon(32),
+                    Image = LoadRibbonIcon(16),
                     CommandParameter = "TRANSLATETEXT",
                     CommandHandler = commandHandler
                 };
@@ -120,6 +122,34 @@ namespace TranslateText
                 Application.DocumentManager.MdiActiveDocument?.Editor.WriteMessage(
                     $"\n[TranslateText] Error loading ribbon: {ex.Message}\n");
             }
+        }
+
+        /// <summary>
+        /// Load icon từ file .ico trong thư mục Resource (cạnh DLL).
+        /// Dùng cho Ribbon, Command Line và Dynamic Input.
+        /// </summary>
+        private System.Windows.Media.ImageSource LoadRibbonIcon(int size)
+        {
+            try
+            {
+                string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                string iconPath = Path.Combine(assemblyDir, "Resource", "IconRibbon_TranslateText_32px.ico");
+
+                if (File.Exists(iconPath))
+                {
+                    var uri = new Uri(iconPath, UriKind.Absolute);
+                    var icon = System.Windows.Media.Imaging.BitmapFrame.Create(
+                        uri, System.Windows.Media.Imaging.BitmapCreateOptions.None,
+                        System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+                    return icon;
+                }
+            }
+            catch
+            {
+                // Fallback: nếu không load được icon, dùng icon sinh tự động
+            }
+
+            return GenerateIcon("TT", size);
         }
 
         /// <summary>
