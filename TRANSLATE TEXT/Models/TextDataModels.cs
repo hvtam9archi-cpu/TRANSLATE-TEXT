@@ -22,7 +22,6 @@ namespace TranslateText.Models
         public string OriginalText { get; set; }
         public string ProcessedText { get; set; }
         public bool IsAttribute { get; set; }
-        public string Handle { get; set; }
     }
 
     /// <summary>

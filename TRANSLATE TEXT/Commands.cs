@@ -1,12 +1,11 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+using System.IO;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Runtime;
+using TranslateText.AutoCad;
 using TranslateText.Core;
 using TranslateText.Models;
 using TranslateText.Services;
@@ -36,14 +35,13 @@ namespace TranslateText
         // ========================================================================================
 
         [CommandMethod("TRANSLATETEXT", CommandFlags.UsePickSet)]
-        public async void TranslateTextCmd()
+        public void TranslateTextCmd()
         {
             Document doc = AcApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
             Editor editor = doc.Editor;
             Database database = doc.Database;
 
-            UndoHelper.Begin(doc);
             try
             {
                 // 1. Đọc danh sách Text Style từ bản vẽ
@@ -77,6 +75,8 @@ namespace TranslateText
                     new TypedValue((int)DxfCode.Operator, "<OR"),
                     new TypedValue((int)DxfCode.Start, "TEXT"),
                     new TypedValue((int)DxfCode.Start, "MTEXT"),
+                    new TypedValue((int)DxfCode.Start, "ATTRIB"),
+                    new TypedValue((int)DxfCode.Start, "ATTDEF"),
                     new TypedValue((int)DxfCode.Start, "MULTILEADER"),
                     new TypedValue((int)DxfCode.Start, "INSERT"),
                     new TypedValue((int)DxfCode.Operator, "OR>")
@@ -86,81 +86,31 @@ namespace TranslateText
                 if (selectionResult.Status != PromptStatus.OK) return;
 
                 // 4. Đọc dữ liệu text từ các entity (Decouple ra POCO)
-                List<TextEntityData> dataList = new List<TextEntityData>();
-                HashSet<ObjectId> processedBlockDefs = new HashSet<ObjectId>();
+                var entityRepository = new TranslationEntityRepository();
+                List<TextEntityData> dataList;
 
                 using (Transaction transaction = doc.TransactionManager.StartTransaction())
                 {
-                    foreach (ObjectId objectId in selectionResult.Value.GetObjectIds())
-                    {
-                        Entity entity = transaction.GetObject(objectId, OpenMode.ForRead) as Entity;
-                        if (entity == null) continue;
-
-                        if (entity is DBText dbText)
-                        {
-                            dataList.Add(new TextEntityData { Id = objectId, OriginalText = dbText.TextString });
-                        }
-                        else if (entity is MText mText)
-                        {
-                            dataList.Add(new TextEntityData { Id = objectId, OriginalText = mText.Contents });
-                        }
-                        else if (entity is MLeader mLeader && mLeader.ContentType == ContentType.MTextContent)
-                        {
-                            dataList.Add(new TextEntityData { Id = objectId, OriginalText = mLeader.MText.Contents });
-                        }
-                        else if (entity is BlockReference blockRef)
-                        {
-                            // A. Xử lý Attribute (Instance level — giá trị khác nhau mỗi block)
-                            foreach (ObjectId attId in blockRef.AttributeCollection)
-                            {
-                                AttributeReference attRef = transaction.GetObject(attId, OpenMode.ForRead) as AttributeReference;
-                                if (attRef != null && !attRef.IsConstant)
-                                {
-                                    dataList.Add(new TextEntityData { Id = attId, OriginalText = attRef.TextString, IsAttribute = true });
-                                }
-                            }
-
-                            // B. Xử lý Block Definition (Chỉ 1 lần mỗi loại Block để tối ưu)
-                            ObjectId blockTableRecordId = blockRef.BlockTableRecord;
-                            if (!processedBlockDefs.Contains(blockTableRecordId))
-                            {
-                                processedBlockDefs.Add(blockTableRecordId);
-                                BlockTableRecord blockRecord = (BlockTableRecord)transaction.GetObject(blockTableRecordId, OpenMode.ForRead);
-                                foreach (ObjectId subId in blockRecord)
-                                {
-                                    Entity subEntity = transaction.GetObject(subId, OpenMode.ForRead) as Entity;
-                                    if (subEntity is DBText subTxt)
-                                        dataList.Add(new TextEntityData { Id = subId, OriginalText = subTxt.TextString });
-                                    else if (subEntity is MText subMtext)
-                                        dataList.Add(new TextEntityData { Id = subId, OriginalText = subMtext.Contents });
-                                }
-                            }
-                        }
-                    }
+                    dataList = entityRepository.Read(transaction, selectionResult.Value.GetObjectIds());
                     transaction.Commit();
                 }
 
                 editor.WriteMessage($"\nProcessing {dataList.Count} objects (Optimized Blocks & Languages)...");
 
-                // 5. Dịch thuật bất đồng bộ (chạy trên thread pool, không block UI Thread)
-                using (SemaphoreSlim semaphore = new SemaphoreSlim(8))
-                {
-                    var tasks = dataList.Select(async item =>
-                    {
-                        string translated = await TranslationService.ProcessAsync(
-                            item.OriginalText, _lastSourceLang, _lastTargetLang, semaphore);
-                        item.ProcessedText = TextCaseHelper.ApplyCaseSafe(translated, _lastTranslateTextCase);
-                    });
+                // 5. Translate unique strings with bounded asynchronous concurrency.
+                var batchProcessor = new TranslationBatchProcessor();
+                TranslationBatchResult batchResult = batchProcessor.ProcessAsync(
+                    dataList,
+                    _lastSourceLang,
+                    _lastTargetLang,
+                    _lastTranslateTextCase).GetAwaiter().GetResult();
 
-                    try
-                    {
-                        await Task.WhenAll(tasks);
-                    }
-                    catch (System.Exception ex)
-                    {
-                        // Bắt AggregateException từ các task dịch thất bại riêng lẻ
-                        editor.WriteMessage($"\n[TranslateText] Partial translation error: {ex.Message}");
-                    }
+                editor.WriteMessage(
+                    $"\nTranslated {batchResult.UniqueTextCount} unique strings for {batchResult.ItemCount} objects.");
+                if (batchResult.FailedTextCount > 0)
+                {
+                    editor.WriteMessage(
+                        $"\n[TranslateText] {batchResult.FailedTextCount} unique strings could not be translated.");
                 }
 
                 // 6. Ghi kết quả về AutoCAD (phải trên Main Thread + DocumentLock)
@@ -175,44 +125,7 @@ namespace TranslateText
                             targetStyleId = textStyleTable[selectedStyleName];
                     }
 
-                    int successCount = 0;
-                    foreach (var item in dataList)
-                    {
-                        if (string.IsNullOrEmpty(item.ProcessedText) || item.OriginalText == item.ProcessedText) continue;
-
-                        Entity entity = transaction.GetObject(item.Id, OpenMode.ForWrite) as Entity;
-                        if (entity == null) continue;
-
-                        if (entity is DBText dbText)
-                        {
-                            dbText.TextString = item.ProcessedText;
-                            if (targetStyleId != ObjectId.Null) dbText.TextStyleId = targetStyleId;
-                        }
-                        else if (entity is MText mText)
-                        {
-                            mText.Contents = item.ProcessedText;
-                            if (targetStyleId != ObjectId.Null) mText.TextStyleId = targetStyleId;
-                        }
-                        else if (entity is MLeader mLeader)
-                        {
-                            MText leaderText = mLeader.MText;
-                            leaderText.Contents = item.ProcessedText;
-                            if (targetStyleId != ObjectId.Null) leaderText.TextStyleId = targetStyleId;
-                            mLeader.MText = leaderText;
-                        }
-                        else if (entity is AttributeReference attRef)
-                        {
-                            attRef.TextString = item.ProcessedText;
-                            if (targetStyleId != ObjectId.Null) attRef.TextStyleId = targetStyleId;
-                        }
-                        else if (entity is AttributeDefinition attDef)
-                        {
-                            attDef.TextString = item.ProcessedText;
-                            if (targetStyleId != ObjectId.Null) attDef.TextStyleId = targetStyleId;
-                        }
-
-                        successCount++;
-                    }
+                    int successCount = entityRepository.Write(transaction, dataList, targetStyleId);
                     transaction.Commit();
                     editor.WriteMessage($"\nDone! Translated {successCount} items.");
                 }
@@ -221,10 +134,6 @@ namespace TranslateText
             catch (System.Exception ex)
             {
                 editor.WriteMessage($"\n[TranslateText] Error: {ex.Message}");
-            }
-            finally
-            {
-                UndoHelper.End(doc);
             }
         }
 
@@ -240,7 +149,6 @@ namespace TranslateText
             Database database = doc.Database;
             Editor editor = doc.Editor;
 
-            UndoHelper.Begin(doc);
             try
             {
                 // 1. Đọc danh sách Text Style (lọc bỏ annotative styles chứa "|")
@@ -301,7 +209,7 @@ namespace TranslateText
 
                         foreach (SelectedObject selectedObject in selectionResult.Value)
                         {
-                            Entity entity = transaction.GetObject(selectedObject.ObjectId, OpenMode.ForWrite) as Entity;
+                            Entity entity = transaction.GetObject(selectedObject.ObjectId, OpenMode.ForRead) as Entity;
                             if (entity == null) continue;
 
                             // Xử lý entity trực tiếp + Attributes
@@ -318,7 +226,7 @@ namespace TranslateText
                                     BlockTableRecord blockRecord = (BlockTableRecord)transaction.GetObject(blockRecordId, OpenMode.ForRead);
                                     foreach (ObjectId subId in blockRecord)
                                     {
-                                        Entity subEntity = transaction.GetObject(subId, OpenMode.ForWrite) as Entity;
+                                        Entity subEntity = transaction.GetObject(subId, OpenMode.ForRead) as Entity;
                                         if (subEntity != null)
                                             logic.ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction);
                                     }
@@ -336,9 +244,76 @@ namespace TranslateText
             {
                 editor.WriteMessage($"\n[ChangeTextStyle] Error: {ex.Message}");
             }
-            finally
+        }
+
+        // ========================================================================================
+        // LỆNH 3: FINDFONT — Kiểm tra và khôi phục font thiếu từ dữ liệu đi kèm plugin
+        // ========================================================================================
+
+        [CommandMethod("FINDFONT", CommandFlags.UsePickSet)]
+        public void FindFontCmd()
+        {
+            Document doc = AcApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            Editor editor = doc.Editor;
+            try
             {
-                UndoHelper.End(doc);
+                var selectionOptions = new PromptSelectionOptions
+                {
+                    MessageForAdding = "\nChọn Text/MText/MLeader/Dimension/Block cần kiểm tra font:"
+                };
+                var selectionFilter = new SelectionFilter(new[]
+                {
+                    new TypedValue((int)DxfCode.Operator, "<OR"),
+                    new TypedValue((int)DxfCode.Start, "TEXT"),
+                    new TypedValue((int)DxfCode.Start, "MTEXT"),
+                    new TypedValue((int)DxfCode.Start, "MULTILEADER"),
+                    new TypedValue((int)DxfCode.Start, "DIMENSION"),
+                    new TypedValue((int)DxfCode.Start, "INSERT"),
+                    new TypedValue((int)DxfCode.Operator, "OR>")
+                });
+
+                PromptSelectionResult selectionResult = editor.GetSelection(
+                    selectionOptions,
+                    selectionFilter);
+                if (selectionResult.Status != PromptStatus.OK) return;
+
+                string fontRoot = FontRepairService.GetDeployedFontRoot();
+                if (!Directory.Exists(fontRoot))
+                {
+                    editor.WriteMessage(
+                        $"\n[FindFont] Không tìm thấy thư mục font của plugin: {fontRoot}");
+                    return;
+                }
+
+                var service = new FontRepairService();
+                FontRepairResult result = service.Repair(
+                    doc.Database,
+                    selectionResult.Value.GetObjectIds(),
+                    fontRoot);
+
+                foreach (string message in result.Messages)
+                    editor.WriteMessage("\n[FindFont] " + message);
+
+                if (result.MissingFontCount == 0)
+                {
+                    editor.WriteMessage(
+                        $"\n[FindFont] Không phát hiện font thiếu trong {result.TextStyleCount} Text Style đã kiểm tra.");
+                }
+                else
+                {
+                    editor.WriteMessage(
+                        $"\n[FindFont] Hoàn tất: kiểm tra {result.TextStyleCount} Text Style, " +
+                        $"thiếu {result.MissingFontCount}, khôi phục {result.RepairedFontCount}, " +
+                        $"chưa tìm thấy {result.UnresolvedFontCount}, lỗi {result.ErrorCount}.");
+                }
+
+                if (result.RepairedFontCount > 0) editor.Regen();
+            }
+            catch (System.Exception ex)
+            {
+                editor.WriteMessage($"\n[FindFont] Lỗi: {ex.Message}");
             }
         }
     }

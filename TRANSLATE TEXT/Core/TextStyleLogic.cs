@@ -13,6 +13,13 @@ namespace TranslateText.Core
     /// </summary>
     public class TextStyleLogic
     {
+        private static readonly Regex FontOverrideRegex = new Regex(
+            @"\\[Ff][^;]*;",
+            RegexOptions.Compiled);
+        private static readonly Regex UnicodeEscapeRegex = new Regex(
+            @"\\?U\+([0-9A-Fa-f]{4})",
+            RegexOptions.Compiled);
+
         private readonly HashSet<ObjectId> _processedIds = new HashSet<ObjectId>();
 
         /// <summary>
@@ -34,7 +41,15 @@ namespace TranslateText.Core
 
             try
             {
-                if (!entity.IsWriteEnabled) entity.UpgradeOpen();
+                bool supported = entity is DBText ||
+                    entity is MText ||
+                    entity is BlockReference ||
+                    entity is Dimension ||
+                    (entity is MLeader leader && leader.ContentType == ContentType.MTextContent);
+                if (!supported) return false;
+
+                // A block reference itself does not change; only its attributes do.
+                if (!(entity is BlockReference) && !entity.IsWriteEnabled) entity.UpgradeOpen();
 
                 if (entity is DBText dbText)
                 {
@@ -48,9 +63,7 @@ namespace TranslateText.Core
                 {
                     mText.TextStyleId = styleId;
                     // Remove font override để áp dụng style mới
-                    string content = Regex.Replace(mText.Contents, @"\\[Ff][^;]*;", "");
-                    content = Regex.Replace(content, @"\\?U\+([0-9A-Fa-f]{4})", m =>
-                        ((char)int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber)).ToString());
+                    string content = CleanMTextContent(mText.Contents);
                     mText.Contents = TextCaseHelper.ApplyCaseSafe(
                         VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
                     _processedIds.Add(entity.ObjectId);
@@ -60,9 +73,7 @@ namespace TranslateText.Core
                 {
                     MText leaderText = mLeader.MText;
                     leaderText.TextStyleId = styleId;
-                    string content = Regex.Replace(leaderText.Contents, @"\\[Ff][^;]*;", "");
-                    content = Regex.Replace(content, @"\\?U\+([0-9A-Fa-f]{4})", m =>
-                        ((char)int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber)).ToString());
+                    string content = CleanMTextContent(leaderText.Contents);
                     leaderText.Contents = TextCaseHelper.ApplyCaseSafe(
                         VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
                     mLeader.MText = leaderText;
@@ -90,7 +101,12 @@ namespace TranslateText.Core
                 }
                 else if (entity is Dimension dimension)
                 {
-                    dimension.DimensionStyle = styleId;
+                    // Apply a text-style override without replacing the dimension style itself.
+                    using (DimStyleTableRecord dimStyle = dimension.GetDimstyleData())
+                    {
+                        dimStyle.Dimtxsty = styleId;
+                        dimension.SetDimstyleData(dimStyle);
+                    }
                     if (!string.IsNullOrEmpty(dimension.DimensionText))
                         dimension.DimensionText = TextCaseHelper.ApplyCaseSafe(
                             VnCharset.Convert(dimension.DimensionText, sourceEncoding, targetEncoding), textCase);
@@ -113,6 +129,15 @@ namespace TranslateText.Core
                     $"\n[ProcessEntity] Warning: {ex.Message}");
             }
             return false;
+        }
+
+        private static string CleanMTextContent(string content)
+        {
+            string cleaned = FontOverrideRegex.Replace(content, string.Empty);
+            return UnicodeEscapeRegex.Replace(cleaned, match =>
+                ((char)int.Parse(
+                    match.Groups[1].Value,
+                    System.Globalization.NumberStyles.HexNumber)).ToString());
         }
     }
 }

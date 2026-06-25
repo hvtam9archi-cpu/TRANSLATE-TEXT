@@ -1,23 +1,12 @@
-using Autodesk.AutoCAD.ApplicationServices;
-
 namespace TranslateText
 {
     /// <summary>
-    /// Nhóm nhiều Transaction trong 1 lệnh thành 1 bước Undo duy nhất.
-    /// Gọi Begin() ở đầu lệnh và End() ở cuối để Ctrl+Z hoàn tác toàn bộ.
+    /// Undo được quản lý tự động bởi Transaction.Commit() trong AutoCAD.
+    /// Class này giữ để tương thích, các phương thức hiện là no-op.
     /// </summary>
     public static class UndoHelper
     {
-        public static void Begin(Document doc)
-        {
-            if (doc == null) return;
-            doc.SendStringToExecute("_.UNDO _Begin ", false, false, false);
-        }
-
-        public static void End(Document doc)
-        {
-            if (doc == null) return;
-            doc.SendStringToExecute("_.UNDO _End ", false, false, false);
-        }
+        public static void Begin(Autodesk.AutoCAD.ApplicationServices.Document doc) { }
+        public static void End(Autodesk.AutoCAD.ApplicationServices.Document doc) { }
     }
 }

@@ -38,9 +38,8 @@
                     <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
                         <Border Width="22" Height="22" CornerRadius="4"
                                 Background="{StaticResource AccentBrush}" VerticalAlignment="Center">
-                            <TextBlock Text="T" Foreground="White" FontWeight="Bold"
-                                       FontFamily="Segoe UI" FontSize="13"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Image x:Name="imgIcon" Width="18" Height="18"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <TextBlock Text="Translate Text" Foreground="{StaticResource FgBrush}"
                                    FontFamily="Segoe UI" FontSize="13"
@@ -48,7 +47,7 @@
                     </StackPanel>
                     <Button x:Name="btnClose" Content="✕" DockPanel.Dock="Right"
                             HorizontalAlignment="Right" Width="32" Height="26" Padding="0"
-                            Style="{StaticResource CloseButton}" Click="BtnClose_Click"/>
+                            Style="{StaticResource CloseButton}" Click="BtnClose_Click" Background="{DynamicResource DangerBrush}"/>
                 </DockPanel>
             </Border>
 
@@ -101,13 +100,12 @@
             <Border Grid.Row="2" Background="{StaticResource TitleBarBrush}" CornerRadius="0,0,10,10">
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
                             VerticalAlignment="Center" Margin="14,0">
-                    <Button x:Name="btnCancel" Content="Cancel" Width="90" Height="34"
-                            Margin="0,0,8,0" Style="{StaticResource DarkButton}"
-                            Click="BtnCancel_Click"/>
-                    <Button x:Name="btnTranslate" Content="Translate" Width="120" Height="34"
+					<Button x:Name="btnTranslate" Content="Translate" Width="146" Height="34"
                             Style="{StaticResource AccentButton}"
-                            Click="BtnTranslate_Click"/>
-                </StackPanel>
+                            Click="BtnTranslate_Click" Margin="0,0,8,0"/>
+					<Button x:Name="btnCancel" Content="Cancel" Width="140" Height="34" Style="{StaticResource DarkButton}"
+                            Click="BtnCancel_Click"/>
+				</StackPanel>
             </Border>
         </Grid>
     </Border>

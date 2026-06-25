@@ -21,6 +21,14 @@ Plugin dịch thuật và chuyển đổi mã font tiếng Việt trực tiếp 
 - Hỗ trợ xử lý **MText, DBText, MLeader, Dimension, Block Attributes, AttributeDefinition**
 - Loại bỏ tự động font override (`\F`) trong MText khi đổi style
 
+### 🔎 FINDFONT — Tìm và khôi phục font thiếu
+- Kiểm tra font chính và Big Font của các Text Style đang được đối tượng lựa chọn sử dụng
+- Hỗ trợ **Text, MText, MLeader, Dimension, Block Attributes** và text trong Block Definition
+- Kiểm tra cả font override cục bộ (`\F...;`/`\f...;`) trong MText, MLeader và Dimension Text
+- Tìm font theo tên file SHX/TTF và theo tên family của TrueType
+- Nạp TTF riêng cho tiến trình AutoCAD và cập nhật Text Style tới file font đi kèm plugin
+- Báo chi tiết font đã khôi phục, chưa tìm thấy hoặc không thể sửa trong Xref
+
 ---
 
 ## Kiến trúc
@@ -30,6 +38,11 @@ TRANSLATE TEXT/
 ├── Commands.cs                  ← Entry point ([CommandMethod])
 ├── RibbonSetup.cs               ← IExtensionApplication — Ribbon "TH Tools"
 ├── PackageContents.xml          ← Bundle metadata
+├── Text Font/                   ← Font SHX/TTF được deploy cùng plugin
+│
+├── AutoCad/
+│   ├── TranslationEntityRepository.cs ← Đọc/ghi text entity
+│   └── FontRepairService.cs     ← Phát hiện và khôi phục font thiếu
 │
 ├── Core/
 │   └── TextProcessors.cs        ← FormatProtector, VnCharset, TextCaseHelper
@@ -40,6 +53,8 @@ TRANSLATE TEXT/
 │
 ├── Services/
 │   ├── TranslationService.cs    ← Google Translate API + Cache + Semaphore
+│   ├── TranslationBatchProcessor.cs ← Gom chuỗi trùng và điều phối dịch
+│   ├── EmbeddedFontCatalog.cs   ← Tra cứu tên file và family của font
 │   ├── AecGlossary.cs           ← Từ điển chuyên ngành AEC
 │   └── AppSettings.cs           ← Lưu cài đặt Registry
 │
@@ -52,10 +67,25 @@ TRANSLATE TEXT/
 |------|---------|
 | **Commands.cs** | Chỉ chứa `[CommandMethod]`, gọi đến Services/UI |
 | **RibbonSetup.cs** | Tạo Tab/Panel/Button trên Ribbon AutoCAD |
+| **AutoCad/** | Tương tác Transaction, entity và Text Style của AutoCAD |
 | **Core/** | Logic thuần C# — không phụ thuộc AutoCAD API |
 | **Services/** | Tích hợp API bên ngoài, Registry, từ điển |
 | **Models/** | POCO data class — decouple khỏi Transaction |
 | **UI/** | WPF Windows — dark theme thống nhất |
+
+### Translation pipeline
+
+```text
+AutoCAD selection
+    -> AutoCad/TranslationEntityRepository (read transaction)
+    -> Services/TranslationBatchProcessor (deduplicate + bounded concurrency)
+    -> Services/TranslationService (glossary + bounded cache + HTTP)
+    -> AutoCad/TranslationEntityRepository (write transaction)
+```
+
+The command layer only coordinates UI and transaction lifetimes. Identical strings in a
+selection share one translation task, and concurrent callers share the same in-flight HTTP
+request. The completed-result cache is capped at 4,096 entries for long AutoCAD sessions.
 
 ---
 
@@ -86,7 +116,12 @@ Build project → DLL tự động deploy vào:
 %APPDATA%\Autodesk\ApplicationPlugins\TranslateText.bundle\
 ├── PackageContents.xml
 └── Contents/
-    └── TranslateText.dll
+    ├── TranslateText.dll
+    └── Text Font/
+        ├── Font SHX/
+        ├── Font TCVN3-ABC/
+        ├── Font UTM/
+        └── Font VNI/
 ```
 
 ### Thủ công

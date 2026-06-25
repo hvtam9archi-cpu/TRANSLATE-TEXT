@@ -4,7 +4,7 @@
     <TargetFramework>net48</TargetFramework>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>false</UseWindowsForms>
-    <Platforms>AnyCPU;x64</Platforms>
+    <Platforms>x64</Platforms>
     <LangVersion>latest</LangVersion>
     <RootNamespace>TranslateText</RootNamespace>
     <AssemblyName>TranslateText</AssemblyName>
@@ -15,20 +15,31 @@
     <PackageReference Include="AutoCAD.NET" Version="23.1.0" ExcludeAssets="runtime" />
     <PackageReference Include="AutoCAD.NET.Core" Version="23.1.0" ExcludeAssets="runtime" />
     <PackageReference Include="AutoCAD.NET.Model" Version="23.1.0" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Text.Json" Version="9.0.4" />
   </ItemGroup>
 
   <ItemGroup>
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Web" />
+    <Reference Include="System.Drawing" />
   </ItemGroup>
 
-  <Target Name="DeployBundle" AfterTargets="Build">
+  <ItemGroup>
+    <Content Include="Text Font\**\*.*" Exclude="Text Font\**\.DS_Store">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="DeployBundle" AfterTargets="Build" Condition="'$(DeployBundle)' != 'false'">
     <MakeDir Directories="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" />
     <Copy SourceFiles="@(ReferenceCopyLocalPaths)" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(ProjectDir)\PackageContents.xml" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(ProjectDir)\Resource\IconRibbon_TranslateText_32px.ico" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\Resource" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(ProjectDir)\Resource\IconRibbon_TranslateText_32px.png" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\Resource" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)\Resource\IconRibbon_ChangeText_32px.ico" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\Resource" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)\Resource\IconRibbon_ChangeText_32px.png" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\Resource" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(Content)" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents\%(Content.RelativeDir)" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

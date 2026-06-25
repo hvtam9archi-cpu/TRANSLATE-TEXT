@@ -41,7 +41,14 @@ namespace TranslateText.Core
                 case TextCaseOption.TitleCase:
                     return System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(text.ToLower());
                 case TextCaseOption.ToggleCase:
-                    return new string(text.Select(c => char.IsUpper(c) ? char.ToLower(c) : char.ToUpper(c)).ToArray());
+                    char[] toggled = text.ToCharArray();
+                    for (int i = 0; i < toggled.Length; i++)
+                    {
+                        toggled[i] = char.IsUpper(toggled[i])
+                            ? char.ToLower(toggled[i])
+                            : char.ToUpper(toggled[i]);
+                    }
+                    return new string(toggled);
                 case TextCaseOption.None:
                 default:
                     return text;
@@ -52,8 +59,15 @@ namespace TranslateText.Core
         {
             if (string.IsNullOrEmpty(originalText)) return TextCaseOption.None;
 
-            int upperCount = originalText.Count(c => char.IsUpper(c));
-            int lowerCount = originalText.Count(c => char.IsLower(c));
+            int upperCount = 0;
+            int lowerCount = 0;
+            foreach (char character in originalText)
+            {
+                if (char.IsUpper(character)) upperCount++;
+                else if (char.IsLower(character)) lowerCount++;
+
+                if (upperCount > 0 && lowerCount > 0) return TextCaseOption.None;
+            }
 
             if (upperCount > 0 && lowerCount == 0) return TextCaseOption.UpperCase;
             if (lowerCount > 0 && upperCount == 0) return TextCaseOption.LowerCase;
@@ -87,6 +101,25 @@ namespace TranslateText.Core
             @"({|})",                              // Braces
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+        private static readonly Regex _placeholderRegex = new Regex(
+            @"\[\s*ID\s*:\s*(\d+)\s*\]",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _allTagsRegex = new Regex(
+            @"^[\d\W]+$",
+            RegexOptions.Compiled);
+        private static readonly Regex _paragraphSpacingRegex = new Regex(
+            @"\s*(\\P)\s*",
+            RegexOptions.Compiled);
+        private static readonly Regex _formatSpacingRegex = new Regex(
+            @"(\\(?:[ACFHQTacfhqtWw])[^;]*;)\s+",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _toggleSpacingRegex = new Regex(
+            @"(\\[LloOkK])\s+",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _symbolSpacingRegex = new Regex(
+            @"(%%[cdpCDPuoUO])\s+",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
         public static MaskResult MaskText(string input)
         {
             var result = new MaskResult();
@@ -105,27 +138,34 @@ namespace TranslateText.Core
         {
             if (string.IsNullOrEmpty(translated) || codes == null || codes.Count == 0) return translated?.Trim();
 
-            // Khôi phục mã từ placeholder
-            for (int i = 0; i < codes.Count; i++)
+            translated = _placeholderRegex.Replace(translated, match =>
             {
-                translated = Regex.Replace(translated, $@"\[\s*ID\s*:\s*{i}\s*\]", match => codes[i], RegexOptions.IgnoreCase);
-            }
+                if (int.TryParse(match.Groups[1].Value, out int index) && index < codes.Count)
+                    return codes[index];
+                return match.Value;
+            });
 
-            // Cleanup whitespace do dịch thuật sinh ra
-            translated = Regex.Replace(translated, @"\s*(\\P)\s*", @"\P", RegexOptions.None);
-            translated = Regex.Replace(translated, @"(\\[A-Za-z0-9]+[^;]*;)\s+", @"$1", RegexOptions.IgnoreCase);
-            translated = Regex.Replace(translated, @"(\\[LloOkK])\s+", @"$1", RegexOptions.IgnoreCase);
-            translated = Regex.Replace(translated, @"(%%[cdpCDPuoUO])\s+", @"$1", RegexOptions.IgnoreCase);
+            // Cleanup whitespace do dịch thuật sinh ra - chỉ cleanup sát các mã AutoCAD đã biết
+            translated = _paragraphSpacingRegex.Replace(translated, @"\P");
+            // Chỉ cleanup whitespace sau các mã MText formatting đã biết (F=font, C=color, H=height, etc.)
+            translated = _formatSpacingRegex.Replace(translated, "$1");
+            translated = _toggleSpacingRegex.Replace(translated, "$1");
+            translated = _symbolSpacingRegex.Replace(translated, "$1");
 
-            string[] lines = Regex.Split(translated, @"\\P", RegexOptions.None);
+            string[] lines = translated.Split(new[] { "\\P" }, StringSplitOptions.None);
             for (int j = 0; j < lines.Length; j++) lines[j] = lines[j].Trim();
             return string.Join("\\P", lines);
         }
 
         public static bool IsAllTags(string text)
         {
-            string clean = Regex.Replace(text, @"\[ID:\d+\]", "");
-            return string.IsNullOrWhiteSpace(clean) || Regex.IsMatch(clean, @"^[\d\W]+$");
+            string clean = _placeholderRegex.Replace(text, "");
+            return string.IsNullOrWhiteSpace(clean) || _allTagsRegex.IsMatch(clean);
+        }
+
+        public static string RemoveFormattingCodes(string text)
+        {
+            return string.IsNullOrEmpty(text) ? text : _regexCodes.Replace(text, string.Empty);
         }
     }
 
@@ -140,8 +180,13 @@ namespace TranslateText.Core
         private static readonly Dictionary<char, char> TcvnToUni = new Dictionary<char, char>();
         private static readonly Dictionary<char, char> UniToTcvn = new Dictionary<char, char>();
         private static readonly HashSet<char> UnicodeVietnameseChars = new HashSet<char>();
+        private static readonly string[] VniKeysByLength;
 
-        static VnCharset() { InitializeMaps(); }
+        static VnCharset()
+        {
+            InitializeMaps();
+            VniKeysByLength = VniToUni.Keys.OrderByDescending(key => key.Length).ToArray();
+        }
 
         private static void InitializeMaps()
         {
@@ -253,30 +298,35 @@ namespace TranslateText.Core
 
         private static string VniToUnicode(string input)
         {
-            var keys = VniToUni.Keys.OrderByDescending(k => k.Length);
             StringBuilder sb = new StringBuilder(input);
-            foreach (var k in keys) sb.Replace(k, VniToUni[k]);
+            foreach (string key in VniKeysByLength) sb.Replace(key, VniToUni[key]);
             return sb.ToString();
         }
 
         private static string TcvnToUnicode(string input)
         {
-            StringBuilder sb = new StringBuilder();
-            foreach (char c in input) sb.Append(TcvnToUni.ContainsKey(c) ? TcvnToUni[c] : c);
+            StringBuilder sb = new StringBuilder(input.Length);
+            foreach (char c in input)
+                sb.Append(TcvnToUni.TryGetValue(c, out char converted) ? converted : c);
             return sb.ToString();
         }
 
         private static string UnicodeToVni(string input)
         {
-            StringBuilder sb = new StringBuilder();
-            foreach (char c in input) sb.Append(UniToVni.ContainsKey(c.ToString()) ? UniToVni[c.ToString()] : c.ToString());
+            StringBuilder sb = new StringBuilder(input.Length);
+            foreach (char c in input)
+            {
+                string key = c.ToString();
+                sb.Append(UniToVni.TryGetValue(key, out string converted) ? converted : key);
+            }
             return sb.ToString();
         }
 
         private static string UnicodeToTcvn(string input)
         {
-            StringBuilder sb = new StringBuilder();
-            foreach (char c in input) sb.Append(UniToTcvn.ContainsKey(c) ? UniToTcvn[c] : c);
+            StringBuilder sb = new StringBuilder(input.Length);
+            foreach (char c in input)
+                sb.Append(UniToTcvn.TryGetValue(c, out char converted) ? converted : c);
             return sb.ToString();
         }
 
@@ -299,12 +349,7 @@ namespace TranslateText.Core
             }
 
             // Bước 1: Xóa các mã định dạng AutoCAD để tránh nhận diện sai mã
-            string clean = Regex.Replace(text, @"\\[ACFHQTWacfhqtw][^;]*;", "");
-            clean = Regex.Replace(clean, @"\\P", "");
-            clean = Regex.Replace(clean, @"[{}]", "");
-            clean = Regex.Replace(clean, @"\\[LloOkK]", "");
-            clean = Regex.Replace(clean, @"%%[cdpCDPuoUO]", "");
-            clean = Regex.Replace(clean, @"%%[0-9]{3}", "");
+            string clean = FormatProtector.RemoveFormattingCodes(text);
 
             // BƯỚC 2 (CRITICAL FIX): Lọc tuyệt đối cho Unicode.
             // Cả VNI và TCVN3 trong AutoCAD thực chất đều là hệ font 1-byte (ANSI), mã ký tự hiển thị <= 255.
@@ -324,11 +369,10 @@ namespace TranslateText.Core
             }
 
             // Tính điểm VNI (ưu tiên trọng số vì VNI phải đi theo cặp)
-            foreach (string k in VniToUni.Keys)
+            foreach (string key in VniKeysByLength)
             {
-                if (k.Length < 2) continue;
-                int countMatches = (clean.Length - clean.Replace(k, "").Length) / k.Length;
-                sVNI += countMatches * 2;
+                if (key.Length < 2) continue;
+                sVNI += CountOccurrences(clean, key) * 2;
             }
 
             // BƯỚC 4: Tie-breakers và Heuristics
@@ -349,6 +393,18 @@ namespace TranslateText.Core
             if (sTCVN > sVNI && sTCVN > sUni) return EncodingType.TCVN3;
 
             return EncodingType.Unicode;
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            int count = 0;
+            int startIndex = 0;
+            while ((startIndex = text.IndexOf(value, startIndex, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                startIndex += value.Length;
+            }
+            return count;
         }
     }
 }

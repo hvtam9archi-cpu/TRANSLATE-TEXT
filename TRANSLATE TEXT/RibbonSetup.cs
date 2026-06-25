@@ -90,8 +90,8 @@ namespace TranslateText
                     ShowImage = true,
                     Size = RibbonItemSize.Large,
                     Orientation = System.Windows.Controls.Orientation.Vertical,
-                    LargeImage = LoadRibbonIcon(32),
-                    Image = LoadRibbonIcon(16),
+                    LargeImage = LoadRibbonIcon(32, "IconRibbon_TranslateText_32px.ico"),
+                    Image = LoadRibbonIcon(16, "IconRibbon_TranslateText_32px.ico"),
                     CommandParameter = "TRANSLATETEXT",
                     CommandHandler = commandHandler
                 };
@@ -104,8 +104,8 @@ namespace TranslateText
                     ShowImage = true,
                     Size = RibbonItemSize.Large,
                     Orientation = System.Windows.Controls.Orientation.Vertical,
-                    LargeImage = GenerateIcon("CS", 32),
-                    Image = GenerateIcon("CS", 16),
+                    LargeImage = LoadRibbonIcon(32, "IconRibbon_ChangeText_32px.ico"),
+                    Image = LoadRibbonIcon(16, "IconRibbon_ChangeText_32px.ico"),
                     CommandParameter = "CHANGETEXTSTYLE",
                     CommandHandler = commandHandler
                 };
@@ -128,12 +128,12 @@ namespace TranslateText
         /// Load icon từ file .ico trong thư mục Resource (cạnh DLL).
         /// Dùng cho Ribbon, Command Line và Dynamic Input.
         /// </summary>
-        private System.Windows.Media.ImageSource LoadRibbonIcon(int size)
+        private System.Windows.Media.ImageSource LoadRibbonIcon(int size, string iconFileName = "IconRibbon_TranslateText_32px.ico")
         {
             try
             {
                 string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-                string iconPath = Path.Combine(assemblyDir, "Resource", "IconRibbon_TranslateText_32px.ico");
+                string iconPath = Path.Combine(assemblyDir, "Resource", iconFileName);
 
                 if (File.Exists(iconPath))
                 {
@@ -149,7 +149,9 @@ namespace TranslateText
                 // Fallback: nếu không load được icon, dùng icon sinh tự động
             }
 
-            return GenerateIcon("TT", size);
+            // Fallback text dựa trên tên icon
+            string fallbackText = iconFileName.Contains("Change", StringComparison.OrdinalIgnoreCase) ? "CS" : "TT";
+            return GenerateIcon(fallbackText, size);
         }
 
         /// <summary>
