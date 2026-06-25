@@ -18,6 +18,7 @@ namespace TranslateText.UI
         public ChangeStyleWindow(List<string> styleNames, string savedStyle, int savedTgtIdx, int savedSrcIdx, TranslateText.Core.TextCaseOption defaultTextCase)
         {
             InitializeComponent();
+            LoadWindowIcon("IconRibbon_ChangeText_32px.ico");
 
             // Populate Target Style
             foreach (var styleName in styleNames)
@@ -71,6 +72,24 @@ namespace TranslateText.UI
         {
             IsConfirmed = false;
             Close();
+        }
+
+        private void LoadWindowIcon(string iconFileName)
+        {
+            try
+            {
+                string assemblyDir = System.IO.Path.GetDirectoryName(
+                    System.Reflection.Assembly.GetExecutingAssembly().Location);
+                string iconPath = System.IO.Path.Combine(assemblyDir, "Resource", iconFileName);
+                if (System.IO.File.Exists(iconPath))
+                {
+                    var uri = new System.Uri(iconPath, System.UriKind.Absolute);
+                    imgIcon.Source = System.Windows.Media.Imaging.BitmapFrame.Create(
+                        uri, System.Windows.Media.Imaging.BitmapCreateOptions.None,
+                        System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+                }
+            }
+            catch { }
         }
 
         private void BtnOk_Click(object sender, RoutedEventArgs e)

@@ -36,14 +36,13 @@ namespace TranslateText
         // ========================================================================================
 
         [CommandMethod("TRANSLATETEXT", CommandFlags.UsePickSet)]
-        public async void TranslateTextCmd()
+        public void TranslateTextCmd()
         {
             Document doc = AcApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
             Editor editor = doc.Editor;
             Database database = doc.Database;
 
-            UndoHelper.Begin(doc);
             try
             {
                 // 1. Đọc danh sách Text Style từ bản vẽ
@@ -142,19 +141,19 @@ namespace TranslateText
 
                 editor.WriteMessage($"\nProcessing {dataList.Count} objects (Optimized Blocks & Languages)...");
 
-                // 5. Dịch thuật bất đồng bộ (chạy trên thread pool, không block UI Thread)
+                // 5. Dịch thuật đồng bộ (chạy trên thread pool, không block UI Thread)
                 using (SemaphoreSlim semaphore = new SemaphoreSlim(8))
                 {
-                    var tasks = dataList.Select(async item =>
+                    var tasks = dataList.Select(item => Task.Run(async () =>
                     {
                         string translated = await TranslationService.ProcessAsync(
                             item.OriginalText, _lastSourceLang, _lastTargetLang, semaphore);
                         item.ProcessedText = TextCaseHelper.ApplyCaseSafe(translated, _lastTranslateTextCase);
-                    });
+                    })).ToArray();
 
                     try
                     {
-                        await Task.WhenAll(tasks);
+                        Task.WaitAll(tasks);
                     }
                     catch (System.Exception ex)
                     {
@@ -222,10 +221,6 @@ namespace TranslateText
             {
                 editor.WriteMessage($"\n[TranslateText] Error: {ex.Message}");
             }
-            finally
-            {
-                UndoHelper.End(doc);
-            }
         }
 
         // ========================================================================================
@@ -240,7 +235,6 @@ namespace TranslateText
             Database database = doc.Database;
             Editor editor = doc.Editor;
 
-            UndoHelper.Begin(doc);
             try
             {
                 // 1. Đọc danh sách Text Style (lọc bỏ annotative styles chứa "|")
@@ -335,10 +329,6 @@ namespace TranslateText
             catch (System.Exception ex)
             {
                 editor.WriteMessage($"\n[ChangeTextStyle] Error: {ex.Message}");
-            }
-            finally
-            {
-                UndoHelper.End(doc);
             }
         }
     }

@@ -1,10 +1,11 @@
 using System;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Text.RegularExpressions;
+using System.Text.Json;
 using TranslateText.Core;
 using TranslateText.Models;
 
@@ -13,6 +14,7 @@ namespace TranslateText.Services
     /// <summary>
     /// Dịch vụ dịch thuật: Check Cache → Tra từ điển AEC → Gọi Google Translate API.
     /// Sử dụng HttpClient static + Semaphore để giới hạn concurrent request.
+    /// Hỗ trợ API Key tùy chọn (lưu trong Registry) để dùng Google Cloud Translation thay vì scraping.
     /// </summary>
     public static class TranslationService
     {
@@ -81,39 +83,37 @@ namespace TranslateText.Services
         private static async Task<string> TranslateApiAsync(string text, string sl, string tl, SemaphoreSlim semaphore)
         {
             // Sử dụng Semaphore để giới hạn số lượng request gửi đi cùng lúc (tránh lỗi 429)
-            await semaphore.WaitAsync();
+            await semaphore.WaitAsync().ConfigureAwait(false);
             try
             {
                 int retryDelay = 1000;
                 int maxRetries = 3;
+                string apiKey = AppSettings.LoadApiKey();
 
                 for (int i = 0; i < maxRetries; i++)
                 {
                     try
                     {
-                        string url = $"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={System.Web.HttpUtility.UrlEncode(text)}";
-
-                        var request = new HttpRequestMessage(HttpMethod.Get, url);
-                        request.Headers.Add("User-Agent", GetRandomUserAgent());
-
-                        // ConfigureAwait(false) giúp tránh Deadlock UI thread của AutoCAD
-                        var response = await _httpClient.SendAsync(request).ConfigureAwait(false);
-
-                        if (response.IsSuccessStatusCode)
+                        string jsonResponse;
+                        if (!string.IsNullOrEmpty(apiKey))
                         {
-                            string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                            return ParseResultStrict(json, text);
-                        }
-
-                        // Nếu bị chặn (Too Many Requests), chờ tăng dần thời gian rồi thử lại
-                        if ((int)response.StatusCode == 429)
-                        {
-                            await Task.Delay(retryDelay * (i + 1)).ConfigureAwait(false);
+                            // Dùng Google Cloud Translation API (cần API Key)
+                            jsonResponse = await CallCloudTranslationApiAsync(text, sl, tl, apiKey).ConfigureAwait(false);
                         }
                         else
                         {
-                            break;
+                            // Dùng Google Translate free scraping (fallback)
+                            jsonResponse = await CallFreeTranslateApiAsync(text, sl, tl).ConfigureAwait(false);
                         }
+
+                        if (!string.IsNullOrEmpty(jsonResponse))
+                            return jsonResponse;
+
+                        break;
+                    }
+                    catch (HttpRequestException ex) when (ex.Message.Contains("429") || ex.Message.Contains("TooManyRequests"))
+                    {
+                        await Task.Delay(retryDelay * (i + 1)).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -129,47 +129,111 @@ namespace TranslateText.Services
         }
 
         /// <summary>
-        /// Hàm phân tích JSON thủ công để lấy kết quả dịch (không cần Newtonsoft)
+        /// Gọi Google Cloud Translation API với API Key (ổn định, không bị chặn).
         /// </summary>
-        private static string ParseResultStrict(string json, string original)
+        private static async Task<string> CallCloudTranslationApiAsync(string text, string sl, string tl, string apiKey)
+        {
+            string url = $"https://translation.googleapis.com/language/translate/v2?key={apiKey}";
+
+            var payload = new
+            {
+                q = text,
+                source = sl == "auto" ? null : sl,
+                target = tl,
+                format = "text"
+            };
+
+            string jsonPayload = JsonSerializer.Serialize(payload);
+            var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync(url, content).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return ParseCloudTranslationJson(json, text);
+        }
+
+        /// <summary>
+        /// Parse response từ Google Cloud Translation API.
+        /// </summary>
+        private static string ParseCloudTranslationJson(string json, string original)
         {
             try
             {
-                StringBuilder sb = new StringBuilder();
-                int depth = 0;
-                bool inString = false;
-                bool isTransSegment = false;
-
-                for (int i = 0; i < json.Length; i++)
+                using (JsonDocument doc = JsonDocument.Parse(json))
                 {
-                    char c = json[i];
-                    if (inString)
+                    var data = doc.RootElement.GetProperty("data");
+                    var translations = data.GetProperty("translations");
+                    if (translations.GetArrayLength() > 0)
                     {
-                        if (c == '\\' && i + 1 < json.Length) { i++; continue; }
-                        if (c == '"')
+                        string translatedText = translations[0].GetProperty("translatedText").GetString();
+                        return System.Net.WebUtility.HtmlDecode(translatedText);
+                    }
+                }
+            }
+            catch
+            {
+                // Fallback
+            }
+            return original;
+        }
+
+        /// <summary>
+        /// Gọi Google Translate free API (scraping) - không cần API Key.
+        /// </summary>
+        private static async Task<string> CallFreeTranslateApiAsync(string text, string sl, string tl)
+        {
+            string url = $"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={System.Web.HttpUtility.UrlEncode(text)}";
+
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("User-Agent", GetRandomUserAgent());
+
+            var response = await _httpClient.SendAsync(request).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return ParseFreeTranslateJson(json, text);
+        }
+
+        /// <summary>
+        /// Parse response từ Google Translate free API (dùng System.Text.Json thay vì parser thủ công).
+        /// </summary>
+        private static string ParseFreeTranslateJson(string json, string original)
+        {
+            try
+            {
+                using (JsonDocument doc = JsonDocument.Parse(json))
+                {
+                    var sb = new StringBuilder();
+                    var root = doc.RootElement;
+
+                    if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
+                    {
+                        var sentences = root[0];
+                        if (sentences.ValueKind == JsonValueKind.Array)
                         {
-                            inString = false;
-                            if (depth == 3 && isTransSegment)
+                            foreach (var item in sentences.EnumerateArray())
                             {
-                                int end = i, start = i - 1;
-                                while (start >= 0) { if (json[start] == '"' && (start == 0 || json[start - 1] != '\\')) break; start--; }
-                                if (start >= 0)
+                                if (item.ValueKind == JsonValueKind.Array && item.GetArrayLength() > 0)
                                 {
-                                    string seg = json.Substring(start + 1, end - start - 1);
-                                    sb.Append(Regex.Unescape(seg));
-                                    isTransSegment = false;
+                                    var seg = item[0];
+                                    if (seg.ValueKind == JsonValueKind.String)
+                                    {
+                                        sb.Append(seg.GetString());
+                                    }
                                 }
                             }
                         }
-                        continue;
                     }
-                    if (c == '[') { depth++; if (depth == 3) isTransSegment = true; }
-                    else if (c == ']') { if (depth == 2) return sb.ToString(); depth--; }
-                    else if (c == '"') inString = true;
+
+                    string result = sb.ToString();
+                    return string.IsNullOrWhiteSpace(result) ? original : result;
                 }
-                return string.IsNullOrWhiteSpace(sb.ToString()) ? original : sb.ToString();
             }
-            catch { return original; }
+            catch
+            {
+                return original;
+            }
         }
     }
 }

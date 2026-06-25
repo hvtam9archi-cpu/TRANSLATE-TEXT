@@ -111,9 +111,10 @@ namespace TranslateText.Core
                 translated = Regex.Replace(translated, $@"\[\s*ID\s*:\s*{i}\s*\]", match => codes[i], RegexOptions.IgnoreCase);
             }
 
-            // Cleanup whitespace do dịch thuật sinh ra
+            // Cleanup whitespace do dịch thuật sinh ra - chỉ cleanup sát các mã AutoCAD đã biết
             translated = Regex.Replace(translated, @"\s*(\\P)\s*", @"\P", RegexOptions.None);
-            translated = Regex.Replace(translated, @"(\\[A-Za-z0-9]+[^;]*;)\s+", @"$1", RegexOptions.IgnoreCase);
+            // Chỉ cleanup whitespace sau các mã MText formatting đã biết (F=font, C=color, H=height, etc.)
+            translated = Regex.Replace(translated, @"(\\(?:[ACFHQTacfhqtWw])[^;]*;)\s+", @"$1", RegexOptions.IgnoreCase);
             translated = Regex.Replace(translated, @"(\\[LloOkK])\s+", @"$1", RegexOptions.IgnoreCase);
             translated = Regex.Replace(translated, @"(%%[cdpCDPuoUO])\s+", @"$1", RegexOptions.IgnoreCase);
 

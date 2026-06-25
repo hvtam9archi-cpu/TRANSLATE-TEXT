@@ -38,9 +38,8 @@
                     <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
                         <Border Width="22" Height="22" CornerRadius="4"
                                 Background="{StaticResource AccentBrush}" VerticalAlignment="Center">
-                            <TextBlock Text="T" Foreground="White" FontWeight="Bold"
-                                       FontFamily="Segoe UI" FontSize="13"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Image x:Name="imgIcon" Width="18" Height="18"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <TextBlock Text="Translate Text" Foreground="{StaticResource FgBrush}"
                                    FontFamily="Segoe UI" FontSize="13"
