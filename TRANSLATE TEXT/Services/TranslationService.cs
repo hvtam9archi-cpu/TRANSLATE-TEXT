@@ -1,72 +1,87 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Text.Json;
+using System.Web.Script.Serialization;
 using TranslateText.Core;
 using TranslateText.Models;
 
 namespace TranslateText.Services
 {
     /// <summary>
-    /// Dịch vụ dịch thuật: Check Cache → Tra từ điển AEC → Gọi Google Translate API.
-    /// Sử dụng HttpClient static + Semaphore để giới hạn concurrent request.
-    /// Hỗ trợ API Key tùy chọn (lưu trong Registry) để dùng Google Cloud Translation thay vì scraping.
+    /// Resolves AEC glossary entries and calls the configured translation endpoint.
+    /// Successful results are cached; failed requests are never cached as translations.
     /// </summary>
     public static class TranslationService
     {
         private const int MaxCacheEntries = 4096;
-        private static readonly HttpClient _httpClient;
-        private static int _userAgentIndex = -1;
+        private const int MaxApiAttempts = 3;
+        private const int RetryDelayMilliseconds = 1000;
 
-        // Cache is bounded so long AutoCAD sessions cannot grow memory without limit.
-        private static readonly ConcurrentDictionary<string, string> _cache
-            = new ConcurrentDictionary<string, string>();
-        private static readonly ConcurrentQueue<string> _cacheOrder = new ConcurrentQueue<string>();
-
-        // Concurrent callers for the same text/language pair share one request.
-        private static readonly ConcurrentDictionary<string, Lazy<Task<string>>> _inFlight
-            = new ConcurrentDictionary<string, Lazy<Task<string>>>();
-
-        // Danh sách User-Agent để giả lập trình duyệt, tránh bị Google chặn
-        private static readonly string[] _userAgents = new string[]
+        private static readonly HttpClient HttpClient;
+        private static readonly ConcurrentDictionary<string, string> Cache =
+            new ConcurrentDictionary<string, string>();
+        private static readonly ConcurrentQueue<string> CacheOrder =
+            new ConcurrentQueue<string>();
+        private static readonly ConcurrentDictionary<string, Lazy<Task<string>>> InFlight =
+            new ConcurrentDictionary<string, Lazy<Task<string>>>();
+        private static readonly string[] UserAgents =
         {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
         };
 
+        private static int _userAgentIndex = -1;
+
         static TranslationService()
         {
-            ServicePointManager.DefaultConnectionLimit = 100;
-            ServicePointManager.Expect100Continue = false;
-            _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-        }
-
-        private static string GetNextUserAgent()
-        {
-            int index = Interlocked.Increment(ref _userAgentIndex) & int.MaxValue;
-            return _userAgents[index % _userAgents.Length];
+            var handler = new HttpClientHandler
+            {
+                MaxConnectionsPerServer = TranslationBatchProcessor.DefaultMaxConcurrency
+            };
+            HttpClient = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(60)
+            };
+            HttpClient.DefaultRequestHeaders.ExpectContinue = false;
         }
 
         /// <summary>
-        /// Hàm xử lý chính: Check Cache → Mask → Translate → Unmask
+        /// Translates one formatted source string after protecting AutoCAD format codes.
+        /// Concurrent callers for the same text and language pair share one request.
         /// </summary>
-        public static async Task<string> ProcessAsync(string input, string sl, string tl, SemaphoreSlim semaphore)
+        public static async Task<string> ProcessAsync(
+            string input,
+            string sourceLanguage,
+            string targetLanguage,
+            SemaphoreSlim semaphore)
         {
             if (string.IsNullOrWhiteSpace(input)) return input;
+            if (semaphore == null) throw new ArgumentNullException(nameof(semaphore));
 
-            string cacheKey = string.Concat(sl, "\u001F", tl, "\u001F", input);
-            if (_cache.TryGetValue(cacheKey, out string cachedResult)) return cachedResult;
+            string cacheKey = string.Concat(
+                sourceLanguage,
+                "\u001F",
+                targetLanguage,
+                "\u001F",
+                input);
+            if (Cache.TryGetValue(cacheKey, out string cachedResult)) return cachedResult;
 
-            var pending = _inFlight.GetOrAdd(
+            Lazy<Task<string>> pending = InFlight.GetOrAdd(
                 cacheKey,
                 _ => new Lazy<Task<string>>(
-                    () => ProcessUncachedAsync(input, sl, tl, semaphore, cacheKey),
+                    () => ProcessUncachedAsync(
+                        input,
+                        sourceLanguage,
+                        targetLanguage,
+                        semaphore,
+                        cacheKey),
                     LazyThreadSafetyMode.ExecutionAndPublication));
 
             try
@@ -76,14 +91,18 @@ namespace TranslateText.Services
             finally
             {
                 var entry = new KeyValuePair<string, Lazy<Task<string>>>(cacheKey, pending);
-                ((ICollection<KeyValuePair<string, Lazy<Task<string>>>>)_inFlight).Remove(entry);
+                ((ICollection<KeyValuePair<string, Lazy<Task<string>>>>)InFlight).Remove(entry);
             }
         }
 
         private static async Task<string> ProcessUncachedAsync(
-            string input, string sl, string tl, SemaphoreSlim semaphore, string cacheKey)
+            string input,
+            string sourceLanguage,
+            string targetLanguage,
+            SemaphoreSlim semaphore,
+            string cacheKey)
         {
-            var maskResult = FormatProtector.MaskText(input);
+            MaskResult maskResult = FormatProtector.MaskText(input);
 
             if (FormatProtector.IsAllTags(maskResult.MaskedText))
             {
@@ -91,78 +110,86 @@ namespace TranslateText.Services
                 return input;
             }
 
-            string aecDirectResult = AecGlossary.Lookup(maskResult.MaskedText, sl, tl);
-            if (!string.IsNullOrEmpty(aecDirectResult))
+            string glossaryResult = AecGlossary.Lookup(
+                maskResult.MaskedText,
+                sourceLanguage,
+                targetLanguage);
+            if (!string.IsNullOrEmpty(glossaryResult))
             {
-                string dictText = FormatProtector.UnmaskText(aecDirectResult, maskResult.Codes);
-                CacheResult(cacheKey, dictText);
-                return dictText;
+                string restoredGlossaryText = FormatProtector.UnmaskText(
+                    glossaryResult,
+                    maskResult.Codes);
+                CacheResult(cacheKey, restoredGlossaryText);
+                return restoredGlossaryText;
             }
 
-            string translatedRaw = await TranslateApiAsync(maskResult.MaskedText, sl, tl, semaphore);
-            string finalText = FormatProtector.UnmaskText(translatedRaw, maskResult.Codes);
+            string translatedText = await TranslateApiAsync(
+                maskResult.MaskedText,
+                sourceLanguage,
+                targetLanguage,
+                semaphore).ConfigureAwait(false);
+            string finalText = FormatProtector.UnmaskText(translatedText, maskResult.Codes);
             CacheResult(cacheKey, finalText);
             return finalText;
         }
 
         private static void CacheResult(string key, string value)
         {
-            if (!_cache.TryAdd(key, value))
+            if (!Cache.TryAdd(key, value))
             {
-                _cache[key] = value;
+                Cache[key] = value;
                 return;
             }
 
-            _cacheOrder.Enqueue(key);
-            while (_cache.Count > MaxCacheEntries && _cacheOrder.TryDequeue(out string oldestKey))
-            {
-                _cache.TryRemove(oldestKey, out string ignored);
-            }
+            CacheOrder.Enqueue(key);
+            while (Cache.Count > MaxCacheEntries && CacheOrder.TryDequeue(out string oldestKey))
+                Cache.TryRemove(oldestKey, out string ignored);
         }
 
-        private static async Task<string> TranslateApiAsync(string text, string sl, string tl, SemaphoreSlim semaphore)
+        private static async Task<string> TranslateApiAsync(
+            string text,
+            string sourceLanguage,
+            string targetLanguage,
+            SemaphoreSlim semaphore)
         {
-            // Sử dụng Semaphore để giới hạn số lượng request gửi đi cùng lúc (tránh lỗi 429)
             await semaphore.WaitAsync().ConfigureAwait(false);
             try
             {
-                int retryDelay = 1000;
-                int maxRetries = 3;
                 string apiKey = AppSettings.LoadApiKey();
+                Exception lastException = null;
 
-                for (int i = 0; i < maxRetries; i++)
+                for (int attempt = 0; attempt < MaxApiAttempts; attempt++)
                 {
                     try
                     {
-                        string jsonResponse;
                         if (!string.IsNullOrEmpty(apiKey))
                         {
-                            // Dùng Google Cloud Translation API (cần API Key)
-                            jsonResponse = await CallCloudTranslationApiAsync(text, sl, tl, apiKey).ConfigureAwait(false);
+                            return await CallCloudTranslationApiAsync(
+                                text,
+                                sourceLanguage,
+                                targetLanguage,
+                                apiKey).ConfigureAwait(false);
                         }
-                        else
+
+                        return await CallFreeTranslateApiAsync(
+                            text,
+                            sourceLanguage,
+                            targetLanguage).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (IsRetryableTranslationFailure(exception))
+                    {
+                        lastException = exception;
+                        if (attempt < MaxApiAttempts - 1)
                         {
-                            // Dùng Google Translate free scraping (fallback)
-                            jsonResponse = await CallFreeTranslateApiAsync(text, sl, tl).ConfigureAwait(false);
+                            await Task.Delay(
+                                RetryDelayMilliseconds * (attempt + 1)).ConfigureAwait(false);
                         }
-
-                        if (!string.IsNullOrEmpty(jsonResponse))
-                            return jsonResponse;
-
-                        break;
-                    }
-                    catch (HttpRequestException ex) when (ex.Message.Contains("429") || ex.Message.Contains("TooManyRequests"))
-                    {
-                        if (i < maxRetries - 1)
-                            await Task.Delay(retryDelay * (i + 1)).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        if (i < maxRetries - 1)
-                            await Task.Delay(retryDelay).ConfigureAwait(false);
                     }
                 }
-                return text;
+
+                throw new InvalidOperationException(
+                    $"Translation API failed after {MaxApiAttempts} attempts.",
+                    lastException);
             }
             finally
             {
@@ -170,114 +197,139 @@ namespace TranslateText.Services
             }
         }
 
-        /// <summary>
-        /// Gọi Google Cloud Translation API với API Key (ổn định, không bị chặn).
-        /// </summary>
-        private static async Task<string> CallCloudTranslationApiAsync(string text, string sl, string tl, string apiKey)
+        private static bool IsRetryableTranslationFailure(Exception exception)
         {
-            string url = $"https://translation.googleapis.com/language/translate/v2?key={apiKey}";
+            return exception is HttpRequestException ||
+                exception is TaskCanceledException ||
+                exception is InvalidDataException;
+        }
 
-            var payload = new
+        private static async Task<string> CallCloudTranslationApiAsync(
+            string text,
+            string sourceLanguage,
+            string targetLanguage,
+            string apiKey)
+        {
+            string url =
+                $"https://translation.googleapis.com/language/translate/v2?key={apiKey}";
+            var payload = new Dictionary<string, string>
             {
-                q = text,
-                source = sl == "auto" ? null : sl,
-                target = tl,
-                format = "text"
+                ["q"] = text,
+                ["target"] = targetLanguage,
+                ["format"] = "text"
             };
+            if (!string.Equals(sourceLanguage, "auto", StringComparison.OrdinalIgnoreCase))
+                payload["source"] = sourceLanguage;
 
-            string jsonPayload = JsonSerializer.Serialize(payload);
+            string jsonPayload = new JavaScriptSerializer().Serialize(payload);
             using (var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json"))
-            using (var response = await _httpClient.PostAsync(url, content).ConfigureAwait(false))
+            using (HttpResponseMessage response = await HttpClient
+                .PostAsync(url, content)
+                .ConfigureAwait(false))
             {
                 response.EnsureSuccessStatusCode();
                 string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                return ParseCloudTranslationJson(json, text);
+                return ParseCloudTranslationJson(json);
             }
         }
 
-        /// <summary>
-        /// Parse response từ Google Cloud Translation API.
-        /// </summary>
-        private static string ParseCloudTranslationJson(string json, string original)
+        private static string ParseCloudTranslationJson(string json)
         {
             try
             {
-                using (JsonDocument doc = JsonDocument.Parse(json))
+                var serializer = new JavaScriptSerializer();
+                var root = serializer.DeserializeObject(json) as Dictionary<string, object>;
+                if (root == null ||
+                    !root.TryGetValue("data", out object dataValue) ||
+                    !(dataValue is Dictionary<string, object> data) ||
+                    !data.TryGetValue("translations", out object translationsValue) ||
+                    !(translationsValue is object[] translations) ||
+                    translations.Length == 0 ||
+                    !(translations[0] is Dictionary<string, object> translation) ||
+                    !translation.TryGetValue("translatedText", out object translatedValue))
                 {
-                    var data = doc.RootElement.GetProperty("data");
-                    var translations = data.GetProperty("translations");
-                    if (translations.GetArrayLength() > 0)
-                    {
-                        string translatedText = translations[0].GetProperty("translatedText").GetString();
-                        return System.Net.WebUtility.HtmlDecode(translatedText);
-                    }
+                    throw new InvalidDataException(
+                        "Google Cloud Translation response did not contain a translation.");
                 }
+
+                string translatedText = Convert.ToString(translatedValue);
+                if (string.IsNullOrWhiteSpace(translatedText))
+                {
+                    throw new InvalidDataException(
+                        "Google Cloud Translation returned an empty translation.");
+                }
+
+                return WebUtility.HtmlDecode(translatedText);
             }
-            catch
+            catch (ArgumentException exception)
             {
-                // Fallback
+                throw new InvalidDataException(
+                    "Google Cloud Translation returned invalid JSON.",
+                    exception);
             }
-            return original;
         }
 
-        /// <summary>
-        /// Gọi Google Translate free API (scraping) - không cần API Key.
-        /// </summary>
-        private static async Task<string> CallFreeTranslateApiAsync(string text, string sl, string tl)
+        private static async Task<string> CallFreeTranslateApiAsync(
+            string text,
+            string sourceLanguage,
+            string targetLanguage)
         {
-            string url = $"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl}&tl={tl}&dt=t&q={System.Web.HttpUtility.UrlEncode(text)}";
+            string url =
+                "https://translate.googleapis.com/translate_a/single" +
+                $"?client=gtx&sl={sourceLanguage}&tl={targetLanguage}&dt=t" +
+                $"&q={System.Web.HttpUtility.UrlEncode(text)}";
 
             using (var request = new HttpRequestMessage(HttpMethod.Get, url))
             {
                 request.Headers.Add("User-Agent", GetNextUserAgent());
-                using (var response = await _httpClient.SendAsync(request).ConfigureAwait(false))
+                using (HttpResponseMessage response = await HttpClient
+                    .SendAsync(request)
+                    .ConfigureAwait(false))
                 {
                     response.EnsureSuccessStatusCode();
                     string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    return ParseFreeTranslateJson(json, text);
+                    return ParseFreeTranslateJson(json);
                 }
             }
         }
 
-        /// <summary>
-        /// Parse response từ Google Translate free API (dùng System.Text.Json thay vì parser thủ công).
-        /// </summary>
-        private static string ParseFreeTranslateJson(string json, string original)
+        private static string ParseFreeTranslateJson(string json)
         {
             try
             {
-                using (JsonDocument doc = JsonDocument.Parse(json))
+                var serializer = new JavaScriptSerializer();
+                var result = new StringBuilder();
+                var root = serializer.DeserializeObject(json) as object[];
+                if (root != null && root.Length > 0 && root[0] is object[] sentences)
                 {
-                    var sb = new StringBuilder();
-                    var root = doc.RootElement;
-
-                    if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
+                    foreach (object sentenceValue in sentences)
                     {
-                        var sentences = root[0];
-                        if (sentences.ValueKind == JsonValueKind.Array)
-                        {
-                            foreach (var item in sentences.EnumerateArray())
-                            {
-                                if (item.ValueKind == JsonValueKind.Array && item.GetArrayLength() > 0)
-                                {
-                                    var seg = item[0];
-                                    if (seg.ValueKind == JsonValueKind.String)
-                                    {
-                                        sb.Append(seg.GetString());
-                                    }
-                                }
-                            }
-                        }
+                        if (!(sentenceValue is object[] sentence) || sentence.Length == 0)
+                            continue;
+                        if (sentence[0] is string translatedSegment)
+                            result.Append(translatedSegment);
                     }
-
-                    string result = sb.ToString();
-                    return string.IsNullOrWhiteSpace(result) ? original : result;
                 }
+
+                if (result.Length == 0)
+                {
+                    throw new InvalidDataException(
+                        "Google Translate response did not contain a translation.");
+                }
+                return result.ToString();
             }
-            catch
+            catch (ArgumentException exception)
             {
-                return original;
+                throw new InvalidDataException(
+                    "Google Translate returned invalid JSON.",
+                    exception);
             }
+        }
+
+        private static string GetNextUserAgent()
+        {
+            int index = Interlocked.Increment(ref _userAgentIndex) & int.MaxValue;
+            return UserAgents[index % UserAgents.Length];
         }
     }
 }

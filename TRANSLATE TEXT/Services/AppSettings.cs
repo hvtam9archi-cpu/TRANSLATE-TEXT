@@ -1,57 +1,73 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Security;
+using Microsoft.Win32;
+
 namespace TranslateText.Services
 {
     /// <summary>
-    /// Lưu/Đọc cài đặt người dùng vào Registry (Windows).
-    /// Dùng cho lệnh CHANGETEXTSTYLE để nhớ lựa chọn lần cuối.
-    /// Cũng lưu Google Cloud API Key để dùng Translation API chính thức.
+    /// Stores per-user plugin settings in the Windows registry.
+    /// Registry failures are non-fatal but are recorded in TRACE output.
     /// </summary>
     public static class AppSettings
     {
-        private const string REG_PATH = @"Software\HoangTamAutoCADTools\TranslateText";
+        private const string RegistryPath =
+            @"Software\HoangTamAutoCADTools\TranslateText";
 
         public static void Save(string style, int targetEncodingIndex, int sourceEncodingIndex)
         {
             try
             {
-                using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(REG_PATH))
+                using (RegistryKey key = OpenWritableKey())
                 {
-                    key.SetValue("TargetStyle", style);
+                    key.SetValue("TargetStyle", style ?? string.Empty);
                     key.SetValue("TargetEncodingIndex", targetEncodingIndex);
                     key.SetValue("SourceEncodingIndex", sourceEncodingIndex);
                 }
             }
-            catch { /* Registry write failed — non-critical, skip silently */ }
+            catch (Exception exception) when (IsRegistryFailure(exception))
+            {
+                LogRegistryFailure("save text settings", exception);
+            }
         }
 
-        public static void Load(out string style, out int targetEncodingIndex, out int sourceEncodingIndex)
+        public static void Load(
+            out string style,
+            out int targetEncodingIndex,
+            out int sourceEncodingIndex)
         {
-            style = "";
+            style = string.Empty;
             targetEncodingIndex = 0;
             sourceEncodingIndex = 0;
+
             try
             {
-                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(REG_PATH))
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RegistryPath))
                 {
-                    if (key != null)
-                    {
-                        style = key.GetValue("TargetStyle", "").ToString();
-                        targetEncodingIndex = System.Convert.ToInt32(key.GetValue("TargetEncodingIndex", 0));
-                        sourceEncodingIndex = System.Convert.ToInt32(key.GetValue("SourceEncodingIndex", 0));
-                    }
+                    if (key == null) return;
+
+                    style = Convert.ToString(key.GetValue("TargetStyle", string.Empty));
+                    targetEncodingIndex = Convert.ToInt32(
+                        key.GetValue("TargetEncodingIndex", 0));
+                    sourceEncodingIndex = Convert.ToInt32(
+                        key.GetValue("SourceEncodingIndex", 0));
                 }
             }
-            catch { /* Registry read failed — non-critical, use defaults */ }
+            catch (Exception exception) when (IsRegistryFailure(exception))
+            {
+                style = string.Empty;
+                targetEncodingIndex = 0;
+                sourceEncodingIndex = 0;
+                LogRegistryFailure("load text settings", exception);
+            }
         }
 
-        /// <summary>
-        /// Lưu Google Cloud Translation API Key vào Registry.
-        /// Nếu key rỗng, xóa giá trị cũ.
-        /// </summary>
         public static void SaveApiKey(string apiKey)
         {
             try
             {
-                using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(REG_PATH))
+                using (RegistryKey key = OpenWritableKey())
                 {
                     if (string.IsNullOrEmpty(apiKey))
                         key.DeleteValue("GoogleApiKey", false);
@@ -59,28 +75,50 @@ namespace TranslateText.Services
                         key.SetValue("GoogleApiKey", apiKey);
                 }
             }
-            catch { /* Non-critical */ }
+            catch (Exception exception) when (IsRegistryFailure(exception))
+            {
+                LogRegistryFailure("save Google API key", exception);
+            }
         }
 
-        /// <summary>
-        /// Đọc Google Cloud Translation API Key từ Registry.
-        /// Trả về null/empty nếu chưa có.
-        /// </summary>
         public static string LoadApiKey()
         {
             try
             {
-                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(REG_PATH))
-                {
-                    if (key != null)
-                    {
-                        object val = key.GetValue("GoogleApiKey");
-                        if (val != null) return val.ToString();
-                    }
-                }
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RegistryPath))
+                    return Convert.ToString(key?.GetValue("GoogleApiKey"));
             }
-            catch { /* Non-critical */ }
-            return null;
+            catch (Exception exception) when (IsRegistryFailure(exception))
+            {
+                LogRegistryFailure("load Google API key", exception);
+                return null;
+            }
+        }
+
+        private static RegistryKey OpenWritableKey()
+        {
+            RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath);
+            if (key == null)
+                throw new InvalidOperationException("Could not open the plugin registry key.");
+            return key;
+        }
+
+        private static bool IsRegistryFailure(Exception exception)
+        {
+            return exception is UnauthorizedAccessException ||
+                exception is SecurityException ||
+                exception is IOException ||
+                exception is ObjectDisposedException ||
+                exception is InvalidOperationException ||
+                exception is FormatException ||
+                exception is InvalidCastException ||
+                exception is OverflowException;
+        }
+
+        private static void LogRegistryFailure(string operation, Exception exception)
+        {
+            Trace.WriteLine(
+                $"[TranslateText] Could not {operation}: {exception.Message}");
         }
     }
 }

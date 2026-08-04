@@ -1,10 +1,10 @@
 using System;
-using System.IO;
-using System.Reflection;
 using System.Windows.Input;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
 using Autodesk.Windows;
+using TranslateText.AutoCad;
+using TranslateText.UI;
 
 namespace TranslateText
 {
@@ -21,45 +21,63 @@ namespace TranslateText
 
         public void Initialize()
         {
-            // Đăng ký Idle để chờ Ribbon sẵn sàng
-            Application.Idle += Application_Idle;
-            // Đăng ký SystemVariableChanged để bắt đổi Workspace → vẽ lại Ribbon
-            Application.SystemVariableChanged += Application_SystemVariableChanged;
+            try
+            {
+                // Idempotent subscriptions for NETLOAD/reload scenarios.
+                Application.Idle -= Application_Idle;
+                Application.Idle += Application_Idle;
+                Application.SystemVariableChanged -= Application_SystemVariableChanged;
+                Application.SystemVariableChanged += Application_SystemVariableChanged;
+            }
+            catch (System.Exception exception)
+            {
+                System.Diagnostics.Trace.TraceError(
+                    $"[TranslateText.Initialize] {exception}");
+                Application.DocumentManager.MdiActiveDocument?.Editor.WriteMessage(
+                    $"\n[TranslateText] Initialize failed: {exception.Message}");
+            }
         }
 
         public void Terminate()
         {
-            // Hủy đăng ký event khi unload plugin
-            Application.Idle -= Application_Idle;
-            Application.SystemVariableChanged -= Application_SystemVariableChanged;
+            try
+            {
+                Application.Idle -= Application_Idle;
+                Application.SystemVariableChanged -= Application_SystemVariableChanged;
+                FontRepairService.ReleasePrivateFonts();
+            }
+            catch (System.Exception exception)
+            {
+                System.Diagnostics.Trace.TraceError(
+                    $"[TranslateText.Terminate] {exception}");
+            }
         }
 
         private void Application_Idle(object sender, EventArgs e)
         {
             // Chỉ gọi CreateRibbon khi Ribbon đã sẵn sàng
-            if (ComponentManager.Ribbon != null)
+            if (ComponentManager.Ribbon != null && CreateRibbon())
             {
                 Application.Idle -= Application_Idle;
-                CreateRibbon();
             }
         }
 
         private void Application_SystemVariableChanged(object sender, SystemVariableChangedEventArgs e)
         {
             // Khi đổi Workspace (WSCURRENT), vẽ lại Ribbon nếu cần
-            if (e.Name.Equals("WSCURRENT", StringComparison.OrdinalIgnoreCase)
+            if (string.Equals(e.Name, "WSCURRENT", StringComparison.OrdinalIgnoreCase)
                 && ComponentManager.Ribbon != null)
             {
                 CreateRibbon();
             }
         }
 
-        private void CreateRibbon()
+        private bool CreateRibbon()
         {
             try
             {
                 RibbonControl ribbon = ComponentManager.Ribbon;
-                if (ribbon == null) return;
+                if (ribbon == null) return false;
 
                 // 1. Tìm hoặc Tạo Tab "TH Tools" (chia sẻ với các plugin khác)
                 RibbonTab tab = ribbon.FindTab(TabId);
@@ -67,13 +85,14 @@ namespace TranslateText
                 {
                     tab = new RibbonTab { Title = TabTitle, Id = TabId };
                     ribbon.Tabs.Add(tab);
+                    tab.IsActive = true;
                 }
 
                 // 2. Kiểm tra Panel đã tồn tại chưa (tránh duplicate khi NETLOAD lại hoặc đổi Workspace)
                 foreach (RibbonPanel existingPanel in tab.Panels)
                 {
-                    if (existingPanel.Source.Id == PanelId)
-                        return; // Panel đã có, không cần tạo lại
+                    if (existingPanel.Source?.Id == PanelId)
+                        return true; // Panel đã có, không cần tạo lại
                 }
 
                 // 3. Tạo Panel "Text Tools"
@@ -116,41 +135,36 @@ namespace TranslateText
 
                 tab.Panels.Add(panel);
                 tab.IsActive = true;
+                return true;
             }
             catch (System.Exception ex)
             {
+                System.Diagnostics.Trace.TraceError($"[TranslateText.Ribbon] {ex}");
                 Application.DocumentManager.MdiActiveDocument?.Editor.WriteMessage(
                     $"\n[TranslateText] Error loading ribbon: {ex.Message}\n");
+                return false;
             }
         }
 
         /// <summary>
-        /// Load icon từ file .ico trong thư mục Resource (cạnh DLL).
+        /// Load icon được embed trong assembly bằng Pack URI.
         /// Dùng cho Ribbon, Command Line và Dynamic Input.
         /// </summary>
         private System.Windows.Media.ImageSource LoadRibbonIcon(int size, string iconFileName = "IconRibbon_TranslateText_32px.ico")
         {
-            try
+            if (PluginImageLoader.TryLoad(
+                "Resource/" + iconFileName,
+                out System.Windows.Media.ImageSource icon))
             {
-                string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-                string iconPath = Path.Combine(assemblyDir, "Resource", iconFileName);
-
-                if (File.Exists(iconPath))
-                {
-                    var uri = new Uri(iconPath, UriKind.Absolute);
-                    var icon = System.Windows.Media.Imaging.BitmapFrame.Create(
-                        uri, System.Windows.Media.Imaging.BitmapCreateOptions.None,
-                        System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
-                    return icon;
-                }
-            }
-            catch
-            {
-                // Fallback: nếu không load được icon, dùng icon sinh tự động
+                return icon;
             }
 
             // Fallback text dựa trên tên icon
-            string fallbackText = iconFileName.Contains("Change", StringComparison.OrdinalIgnoreCase) ? "CS" : "TT";
+            string fallbackText = iconFileName.IndexOf(
+                "Change",
+                StringComparison.OrdinalIgnoreCase) >= 0
+                ? "CS"
+                : "TT";
             return GenerateIcon(fallbackText, size);
         }
 
@@ -223,15 +237,27 @@ namespace TranslateText
 
         public void Execute(object parameter)
         {
-            if (parameter is RibbonButton button && button.CommandParameter is string commandName)
+            try
             {
-                Document doc = Application.DocumentManager.MdiActiveDocument;
-                if (doc == null) return;
+                if (!(parameter is RibbonButton button) ||
+                    !(button.CommandParameter is string commandName))
+                {
+                    return;
+                }
 
-                // Hủy lệnh đang chạy (nếu có), sau đó gửi tên lệnh riêng biệt
-                // Tách riêng cancel và command name để tránh bị nuốt ký tự đầu
-                doc.SendStringToExecute("\x1B\x1B", true, false, false);
-                doc.SendStringToExecute(commandName + "\n", true, false, false);
+                Document document = Application.DocumentManager.MdiActiveDocument;
+                if (document == null) return;
+
+                // ICommand của Ribbon không có managed API để gọi một command đã đăng ký.
+                document.SendStringToExecute("\x1B\x1B", true, false, false);
+                document.SendStringToExecute(commandName + "\n", true, false, false);
+            }
+            catch (System.Exception exception)
+            {
+                System.Diagnostics.Trace.TraceError(
+                    $"[TranslateText.RibbonCommand] {exception}");
+                Application.DocumentManager.MdiActiveDocument?.Editor.WriteMessage(
+                    $"\n[TranslateText] Ribbon command failed: {exception.Message}");
             }
         }
     }

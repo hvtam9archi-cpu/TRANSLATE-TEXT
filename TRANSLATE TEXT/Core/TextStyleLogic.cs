@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.DatabaseServices;
 using TranslateText.Models;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
+using DiagnosticsTrace = System.Diagnostics.Trace;
 
 namespace TranslateText.Core
 {
@@ -71,12 +72,15 @@ namespace TranslateText.Core
                 }
                 else if (entity is MLeader mLeader && mLeader.ContentType == ContentType.MTextContent)
                 {
-                    MText leaderText = mLeader.MText;
-                    leaderText.TextStyleId = styleId;
-                    string content = CleanMTextContent(leaderText.Contents);
-                    leaderText.Contents = TextCaseHelper.ApplyCaseSafe(
-                        VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
-                    mLeader.MText = leaderText;
+                    using (MText leaderText = mLeader.MText)
+                    {
+                        if (leaderText == null) return false;
+                        leaderText.TextStyleId = styleId;
+                        string content = CleanMTextContent(leaderText.Contents);
+                        leaderText.Contents = TextCaseHelper.ApplyCaseSafe(
+                            VnCharset.Convert(content, sourceEncoding, targetEncoding), textCase);
+                        mLeader.MText = leaderText;
+                    }
                     mLeader.TextStyleId = styleId;
                     _processedIds.Add(entity.ObjectId);
                     return true;
@@ -124,6 +128,7 @@ namespace TranslateText.Core
             }
             catch (Exception ex)
             {
+                DiagnosticsTrace.TraceError($"[ChangeTextStyle.ProcessEntity] {ex}");
                 // Log nhưng không crash toàn bộ lệnh
                 AcApp.DocumentManager.MdiActiveDocument?.Editor.WriteMessage(
                     $"\n[ProcessEntity] Warning: {ex.Message}");

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Autodesk.AutoCAD.DatabaseServices;
 using TranslateText.Models;
@@ -12,11 +13,21 @@ namespace TranslateText.AutoCad
     {
         public List<TextEntityData> Read(Transaction transaction, IEnumerable<ObjectId> selectedIds)
         {
+            if (transaction == null) throw new ArgumentNullException(nameof(transaction));
+            if (selectedIds == null) throw new ArgumentNullException(nameof(selectedIds));
+
             var items = new List<TextEntityData>();
+            var processedEntities = new HashSet<ObjectId>();
             var processedBlockDefinitions = new HashSet<ObjectId>();
 
             foreach (ObjectId objectId in selectedIds)
             {
+                if (objectId.IsNull || !objectId.IsValid || objectId.IsErased ||
+                    !processedEntities.Add(objectId))
+                {
+                    continue;
+                }
+
                 Entity entity = transaction.GetObject(objectId, OpenMode.ForRead) as Entity;
                 if (entity == null) continue;
 
@@ -26,6 +37,7 @@ namespace TranslateText.AutoCad
 
                 foreach (ObjectId attributeId in blockReference.AttributeCollection)
                 {
+                    if (!processedEntities.Add(attributeId)) continue;
                     var attribute = transaction.GetObject(attributeId, OpenMode.ForRead) as AttributeReference;
                     if (attribute != null && !attribute.IsConstant)
                     {
@@ -42,8 +54,10 @@ namespace TranslateText.AutoCad
                 if (!processedBlockDefinitions.Add(definitionId)) continue;
 
                 var definition = (BlockTableRecord)transaction.GetObject(definitionId, OpenMode.ForRead);
+                if (definition.IsFromExternalReference) continue;
                 foreach (ObjectId childId in definition)
                 {
+                    if (!processedEntities.Add(childId)) continue;
                     Entity child = transaction.GetObject(childId, OpenMode.ForRead) as Entity;
                     if (child != null) AddEntity(items, child, childId);
                 }
@@ -54,9 +68,14 @@ namespace TranslateText.AutoCad
 
         public int Write(Transaction transaction, IEnumerable<TextEntityData> items, ObjectId targetStyleId)
         {
+            if (transaction == null) throw new ArgumentNullException(nameof(transaction));
+            if (items == null) throw new ArgumentNullException(nameof(items));
+
             int successCount = 0;
             foreach (TextEntityData item in items)
             {
+                if (item == null || item.Id.IsNull || !item.Id.IsValid || item.Id.IsErased)
+                    continue;
                 if (string.IsNullOrEmpty(item.ProcessedText) || item.OriginalText == item.ProcessedText)
                     continue;
 
@@ -81,7 +100,17 @@ namespace TranslateText.AutoCad
             }
             else if (entity is MLeader mLeader && mLeader.ContentType == ContentType.MTextContent)
             {
-                items.Add(new TextEntityData { Id = id, OriginalText = mLeader.MText.Contents });
+                using (MText leaderText = mLeader.MText)
+                {
+                    if (leaderText != null)
+                    {
+                        items.Add(new TextEntityData
+                        {
+                            Id = id,
+                            OriginalText = leaderText.Contents
+                        });
+                    }
+                }
             }
         }
 
@@ -103,11 +132,14 @@ namespace TranslateText.AutoCad
 
             if (entity is MLeader mLeader)
             {
-                MText leaderText = mLeader.MText;
-                leaderText.Contents = text;
-                if (!targetStyleId.IsNull) leaderText.TextStyleId = targetStyleId;
-                mLeader.MText = leaderText;
-                return true;
+                using (MText leaderText = mLeader.MText)
+                {
+                    if (leaderText == null) return false;
+                    leaderText.Contents = text;
+                    if (!targetStyleId.IsNull) leaderText.TextStyleId = targetStyleId;
+                    mLeader.MText = leaderText;
+                    return true;
+                }
             }
 
             return false;

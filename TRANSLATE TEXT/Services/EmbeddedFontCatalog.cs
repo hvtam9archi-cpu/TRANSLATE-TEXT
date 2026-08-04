@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Windows.Media;
 
@@ -57,16 +58,25 @@ namespace TranslateText.Services
             fullPath = null;
             if (string.IsNullOrWhiteSpace(requestedFont)) return false;
 
-            string fileName = Path.GetFileName(requestedFont.Trim().Trim('"'));
-            if (_filesByName.TryGetValue(fileName, out fullPath)) return true;
-
-            if (Path.HasExtension(fileName)) return false;
-
-            foreach (string extension in SupportedExtensions)
+            try
             {
-                if (_filesByName.TryGetValue(fileName + extension, out fullPath)) return true;
+                string fileName = Path.GetFileName(requestedFont.Trim().Trim('"'));
+                if (_filesByName.TryGetValue(fileName, out fullPath)) return true;
+
+                if (Path.HasExtension(fileName)) return false;
+
+                foreach (string extension in SupportedExtensions)
+                {
+                    if (_filesByName.TryGetValue(fileName + extension, out fullPath)) return true;
+                }
+                return false;
             }
-            return false;
+            catch (ArgumentException exception)
+            {
+                Trace.WriteLine(
+                    $"[FindFont] Invalid requested font name '{requestedFont}': {exception.Message}");
+                return false;
+            }
         }
 
         public bool TryFindTypeface(string typeface, out string fullPath)
@@ -100,9 +110,15 @@ namespace TranslateText.Services
                     foreach (string familyName in glyph.Win32FamilyNames.Values)
                         AddTypeface(index, familyName, file);
                 }
-                catch
+                catch (Exception exception) when (
+                    exception is ArgumentException ||
+                    exception is FileFormatException ||
+                    exception is IOException ||
+                    exception is NotSupportedException ||
+                    exception is UnauthorizedAccessException)
                 {
-                    // Ignore malformed or unsupported font files and continue indexing.
+                    Trace.WriteLine(
+                        $"[FindFont] Skipped unsupported font metadata '{file}': {exception.Message}");
                 }
             }
             return index;

@@ -12,7 +12,7 @@ Plugin dịch thuật và chuyển đổi mã font tiếng Việt trực tiếp 
 - **Từ điển AEC** tích hợp — dịch chính xác thuật ngữ Kiến trúc/Kỹ thuật/Xây dựng (Mặt bằng, Mặt cắt, Chi tiết…)
 - **Bảo vệ mã MText** — Giữ nguyên định dạng font, màu, gạch chân, xuống dòng (`\P`, `\F`, `%%c`…) trong quá trình dịch
 - **Smart Block Processing** — Mỗi Block Definition chỉ xử lý 1 lần, tối ưu cho bản vẽ có hàng trăm block trùng
-- **In-memory Cache** — Các chuỗi giống nhau chỉ gọi API 1 lần
+- **In-memory Cache** — Các chuỗi giống nhau chỉ gọi API 1 lần; kết quả lỗi không được cache
 
 ### 🔤 CHANGETEXTSTYLE — Chuyển mã Font tiếng Việt
 - Chuyển đổi qua lại giữa **Unicode ↔ VNI Windows ↔ TCVN3 (ABC)**
@@ -42,7 +42,8 @@ TRANSLATE TEXT/
 │
 ├── AutoCad/
 │   ├── TranslationEntityRepository.cs ← Đọc/ghi text entity
-│   └── FontRepairService.cs     ← Phát hiện và khôi phục font thiếu
+│   ├── TextSelectionInteraction.cs ← Prompt và SelectionFilter dùng chung
+│   └── FontRepairService.cs     ← Snapshot → resolve → apply font thiếu
 │
 ├── Core/
 │   └── TextProcessors.cs        ← FormatProtector, VnCharset, TextCaseHelper
@@ -59,6 +60,7 @@ TRANSLATE TEXT/
 │   └── AppSettings.cs           ← Lưu cài đặt Registry
 │
 └── UI/
+    ├── PluginImageLoader.cs      ← Load icon embed bằng WPF Pack URI
     ├── TranslateWindow.xaml/.cs  ← WPF Dialog dịch thuật
     └── ChangeStyleWindow.xaml/.cs ← WPF Dialog đổi style
 ```
@@ -86,6 +88,19 @@ AutoCAD selection
 The command layer only coordinates UI and transaction lifetimes. Identical strings in a
 selection share one translation task, and concurrent callers share the same in-flight HTTP
 request. The completed-result cache is capped at 4,096 entries for long AutoCAD sessions.
+Nếu API lỗi sau ba lần thử, text gốc được giữ nguyên, lỗi được báo theo từng chuỗi duy
+nhất và không được ghi vào cache như một bản dịch thành công.
+
+### FINDFONT pipeline
+
+```text
+AutoCAD selection
+    -> read transaction (snapshot ObjectId, Text Style và formatted text)
+    -> resolve ngoài transaction (quét catalog, đọc metadata TTF, nạp private font)
+    -> write transaction (áp dụng Text Style và inline SHX path)
+```
+
+Không có I/O font chậm hoặc đăng ký font Windows trong lúc transaction AutoCAD đang mở.
 
 ---
 

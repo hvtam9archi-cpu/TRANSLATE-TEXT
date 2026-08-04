@@ -11,6 +11,7 @@ using TranslateText.Models;
 using TranslateText.Services;
 using TranslateText.UI;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
+using DiagnosticsTrace = System.Diagnostics.Trace;
 
 // Đăng ký lệnh cho AutoCAD
 [assembly: CommandClass(typeof(TranslateText.Commands))]
@@ -70,19 +71,11 @@ namespace TranslateText
                 selectedStyleName = window.SelectedTextStyle;
 
                 // 3. Chọn đối tượng Text/MText/MLeader/Block
-                var selectionFilter = new SelectionFilter(new TypedValue[]
-                {
-                    new TypedValue((int)DxfCode.Operator, "<OR"),
-                    new TypedValue((int)DxfCode.Start, "TEXT"),
-                    new TypedValue((int)DxfCode.Start, "MTEXT"),
-                    new TypedValue((int)DxfCode.Start, "ATTRIB"),
-                    new TypedValue((int)DxfCode.Start, "ATTDEF"),
-                    new TypedValue((int)DxfCode.Start, "MULTILEADER"),
-                    new TypedValue((int)DxfCode.Start, "INSERT"),
-                    new TypedValue((int)DxfCode.Operator, "OR>")
-                });
-
-                PromptSelectionResult selectionResult = editor.GetSelection(selectionFilter);
+                PromptSelectionResult selectionResult =
+                    TextSelectionInteraction.GetTextSelection(
+                        editor,
+                        "\nSelect Text/MText/MLeader/Block to translate:",
+                        includeDimensions: false);
                 if (selectionResult.Status != PromptStatus.OK) return;
 
                 // 4. Đọc dữ liệu text từ các entity (Decouple ra POCO)
@@ -111,10 +104,16 @@ namespace TranslateText
                 {
                     editor.WriteMessage(
                         $"\n[TranslateText] {batchResult.FailedTextCount} unique strings could not be translated.");
+                    foreach (string failureMessage in batchResult.FailureMessages)
+                        editor.WriteMessage("\n[TranslateText] " + failureMessage);
+                    if (batchResult.FailedTextCount > batchResult.FailureMessages.Count)
+                    {
+                        editor.WriteMessage(
+                            $"\n[TranslateText] Còn {batchResult.FailedTextCount - batchResult.FailureMessages.Count} lỗi khác; xem log TRACE để biết chi tiết.");
+                    }
                 }
 
-                // 6. Ghi kết quả về AutoCAD (phải trên Main Thread + DocumentLock)
-                using (DocumentLock docLock = doc.LockDocument())
+                // 6. Ghi kết quả về AutoCAD trên main thread của command hiện tại.
                 using (Transaction transaction = doc.TransactionManager.StartTransaction())
                 {
                     ObjectId targetStyleId = ObjectId.Null;
@@ -133,6 +132,7 @@ namespace TranslateText
             }
             catch (System.Exception ex)
             {
+                DiagnosticsTrace.TraceError($"[TRANSLATETEXT] {ex}");
                 editor.WriteMessage($"\n[TranslateText] Error: {ex.Message}");
             }
         }
@@ -242,6 +242,7 @@ namespace TranslateText
             }
             catch (System.Exception ex)
             {
+                DiagnosticsTrace.TraceError($"[CHANGETEXTSTYLE] {ex}");
                 editor.WriteMessage($"\n[ChangeTextStyle] Error: {ex.Message}");
             }
         }
@@ -259,24 +260,11 @@ namespace TranslateText
             Editor editor = doc.Editor;
             try
             {
-                var selectionOptions = new PromptSelectionOptions
-                {
-                    MessageForAdding = "\nChọn Text/MText/MLeader/Dimension/Block cần kiểm tra font:"
-                };
-                var selectionFilter = new SelectionFilter(new[]
-                {
-                    new TypedValue((int)DxfCode.Operator, "<OR"),
-                    new TypedValue((int)DxfCode.Start, "TEXT"),
-                    new TypedValue((int)DxfCode.Start, "MTEXT"),
-                    new TypedValue((int)DxfCode.Start, "MULTILEADER"),
-                    new TypedValue((int)DxfCode.Start, "DIMENSION"),
-                    new TypedValue((int)DxfCode.Start, "INSERT"),
-                    new TypedValue((int)DxfCode.Operator, "OR>")
-                });
-
-                PromptSelectionResult selectionResult = editor.GetSelection(
-                    selectionOptions,
-                    selectionFilter);
+                PromptSelectionResult selectionResult =
+                    TextSelectionInteraction.GetTextSelection(
+                        editor,
+                        "\nChọn Text/MText/Attribute/MLeader/Dimension/Block cần kiểm tra font:",
+                        includeDimensions: true);
                 if (selectionResult.Status != PromptStatus.OK) return;
 
                 string fontRoot = FontRepairService.GetDeployedFontRoot();
@@ -306,13 +294,14 @@ namespace TranslateText
                     editor.WriteMessage(
                         $"\n[FindFont] Hoàn tất: kiểm tra {result.TextStyleCount} Text Style, " +
                         $"thiếu {result.MissingFontCount}, khôi phục {result.RepairedFontCount}, " +
-                        $"chưa tìm thấy {result.UnresolvedFontCount}, lỗi {result.ErrorCount}.");
+                        $"chưa tìm thấy {result.UnresolvedFontCount}.");
                 }
 
                 if (result.RepairedFontCount > 0) editor.Regen();
             }
             catch (System.Exception ex)
             {
+                DiagnosticsTrace.TraceError($"[FINDFONT] {ex}");
                 editor.WriteMessage($"\n[FindFont] Lỗi: {ex.Message}");
             }
         }
