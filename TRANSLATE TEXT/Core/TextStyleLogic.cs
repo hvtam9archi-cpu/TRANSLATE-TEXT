@@ -46,6 +46,7 @@ namespace TranslateText.Core
                     entity is MText ||
                     entity is BlockReference ||
                     entity is Dimension ||
+                    entity is AttributeDefinition ||
                     (entity is MLeader leader && leader.ContentType == ContentType.MTextContent);
                 if (!supported) return false;
 

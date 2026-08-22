@@ -96,9 +96,13 @@ namespace TranslateText.UI
         {
             if (cbSource.SelectedItem is LanguageItem sourceLang)
                 SelectedSourceCode = sourceLang.Code;
+            else
+                SelectedSourceCode = "auto";
 
             if (cbTarget.SelectedItem is LanguageItem targetLang)
                 SelectedTargetCode = targetLang.Code;
+            else
+                SelectedTargetCode = "vi";
 
             SelectedTextStyle = cbStyle.SelectedItem?.ToString() ?? "Keep Original";
             SelectedTextCase = (TranslateText.Core.TextCaseOption)cbTextCase.SelectedIndex;

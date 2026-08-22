@@ -371,6 +371,32 @@
         </Setter>
     </Style>
 
+    <!-- ==================== PROGRESSBAR ==================== -->
+    <Style x:Key="DarkProgressBar" TargetType="{x:Type ProgressBar}">
+        <Setter Property="Height" Value="16"/>
+        <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+        <Setter Property="Background" Value="{StaticResource TrackBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ProgressBar}">
+                    <Grid>
+                        <Border x:Name="PART_Track"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4"/>
+                        <Border x:Name="PART_Indicator"
+                                Background="{TemplateBinding Foreground}"
+                                CornerRadius="4"
+                                HorizontalAlignment="Left"/>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ==================== LABEL (Section Header) ==================== -->
     <Style x:Key="SectionHeader" TargetType="{x:Type TextBlock}">
         <Setter Property="FontFamily" Value="Segoe UI"/>

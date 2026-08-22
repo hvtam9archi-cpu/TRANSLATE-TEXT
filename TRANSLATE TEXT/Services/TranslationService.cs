@@ -60,7 +60,8 @@ namespace TranslateText.Services
             string input,
             string sourceLanguage,
             string targetLanguage,
-            SemaphoreSlim semaphore)
+            SemaphoreSlim semaphore,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(input)) return input;
             if (semaphore == null) throw new ArgumentNullException(nameof(semaphore));
@@ -81,7 +82,8 @@ namespace TranslateText.Services
                         sourceLanguage,
                         targetLanguage,
                         semaphore,
-                        cacheKey),
+                        cacheKey,
+                        cancellationToken),
                     LazyThreadSafetyMode.ExecutionAndPublication));
 
             try
@@ -100,7 +102,8 @@ namespace TranslateText.Services
             string sourceLanguage,
             string targetLanguage,
             SemaphoreSlim semaphore,
-            string cacheKey)
+            string cacheKey,
+            CancellationToken cancellationToken)
         {
             MaskResult maskResult = FormatProtector.MaskText(input);
 
@@ -127,7 +130,8 @@ namespace TranslateText.Services
                 maskResult.MaskedText,
                 sourceLanguage,
                 targetLanguage,
-                semaphore).ConfigureAwait(false);
+                semaphore,
+                cancellationToken).ConfigureAwait(false);
             string finalText = FormatProtector.UnmaskText(translatedText, maskResult.Codes);
             CacheResult(cacheKey, finalText);
             return finalText;
@@ -150,9 +154,10 @@ namespace TranslateText.Services
             string text,
             string sourceLanguage,
             string targetLanguage,
-            SemaphoreSlim semaphore)
+            SemaphoreSlim semaphore,
+            CancellationToken cancellationToken)
         {
-            await semaphore.WaitAsync().ConfigureAwait(false);
+            await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 string apiKey = AppSettings.LoadApiKey();
@@ -168,13 +173,19 @@ namespace TranslateText.Services
                                 text,
                                 sourceLanguage,
                                 targetLanguage,
-                                apiKey).ConfigureAwait(false);
+                                apiKey,
+                                cancellationToken).ConfigureAwait(false);
                         }
 
                         return await CallFreeTranslateApiAsync(
                             text,
                             sourceLanguage,
-                            targetLanguage).ConfigureAwait(false);
+                            targetLanguage,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception exception) when (IsRetryableTranslationFailure(exception))
                     {
@@ -182,7 +193,8 @@ namespace TranslateText.Services
                         if (attempt < MaxApiAttempts - 1)
                         {
                             await Task.Delay(
-                                RetryDelayMilliseconds * (attempt + 1)).ConfigureAwait(false);
+                                RetryDelayMilliseconds * (attempt + 1),
+                                cancellationToken).ConfigureAwait(false);
                         }
                     }
                 }
@@ -208,7 +220,8 @@ namespace TranslateText.Services
             string text,
             string sourceLanguage,
             string targetLanguage,
-            string apiKey)
+            string apiKey,
+            CancellationToken cancellationToken)
         {
             string url =
                 $"https://translation.googleapis.com/language/translate/v2?key={apiKey}";
@@ -223,14 +236,14 @@ namespace TranslateText.Services
 
             string jsonPayload = new JavaScriptSerializer().Serialize(payload);
             using (var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json"))
-            using (HttpResponseMessage response = await HttpClient
-                .PostAsync(url, content)
-                .ConfigureAwait(false))
-            {
-                response.EnsureSuccessStatusCode();
-                string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                return ParseCloudTranslationJson(json);
-            }
+             using (HttpResponseMessage response = await HttpClient
+                 .PostAsync(url, content, cancellationToken)
+                 .ConfigureAwait(false))
+             {
+                 response.EnsureSuccessStatusCode();
+                 string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                 return ParseCloudTranslationJson(json);
+             }
         }
 
         private static string ParseCloudTranslationJson(string json)
@@ -272,24 +285,26 @@ namespace TranslateText.Services
         private static async Task<string> CallFreeTranslateApiAsync(
             string text,
             string sourceLanguage,
-            string targetLanguage)
+            string targetLanguage,
+            CancellationToken cancellationToken)
         {
             string url =
                 "https://translate.googleapis.com/translate_a/single" +
-                $"?client=gtx&sl={sourceLanguage}&tl={targetLanguage}&dt=t" +
-                $"&q={System.Web.HttpUtility.UrlEncode(text)}";
+                $"?client=gtx&sl={Uri.EscapeDataString(sourceLanguage)}" +
+                $"&tl={Uri.EscapeDataString(targetLanguage)}&dt=t" +
+                $"&q={Uri.EscapeDataString(text)}";
 
             using (var request = new HttpRequestMessage(HttpMethod.Get, url))
             {
                 request.Headers.Add("User-Agent", GetNextUserAgent());
-                using (HttpResponseMessage response = await HttpClient
-                    .SendAsync(request)
-                    .ConfigureAwait(false))
-                {
-                    response.EnsureSuccessStatusCode();
-                    string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    return ParseFreeTranslateJson(json);
-                }
+                 using (HttpResponseMessage response = await HttpClient
+                     .SendAsync(request, cancellationToken)
+                     .ConfigureAwait(false))
+                 {
+                     response.EnsureSuccessStatusCode();
+                     string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                     return ParseFreeTranslateJson(json);
+                 }
             }
         }
 

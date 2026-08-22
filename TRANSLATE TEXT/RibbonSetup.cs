@@ -3,7 +3,6 @@ using System.Windows.Input;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
 using Autodesk.Windows;
-using TranslateText.AutoCad;
 using TranslateText.UI;
 
 namespace TranslateText
@@ -44,7 +43,6 @@ namespace TranslateText
             {
                 Application.Idle -= Application_Idle;
                 Application.SystemVariableChanged -= Application_SystemVariableChanged;
-                FontRepairService.ReleasePrivateFonts();
             }
             catch (System.Exception exception)
             {

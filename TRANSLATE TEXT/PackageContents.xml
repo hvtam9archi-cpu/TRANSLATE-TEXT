@@ -7,7 +7,6 @@
       <Commands GroupName="TRANSLATE_GROUP">
         <Command Local="TRANSLATETEXT" Global="TRANSLATETEXT" />
         <Command Local="CHANGETEXTSTYLE" Global="CHANGETEXTSTYLE" />
-        <Command Local="FINDFONT" Global="FINDFONT" />
       </Commands>
     </ComponentEntry>
   </Components>

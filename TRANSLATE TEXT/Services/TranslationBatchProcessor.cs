@@ -17,7 +17,7 @@ namespace TranslateText.Services
         public const int DefaultMaxConcurrency = 8;
 
         private readonly int _maxConcurrency;
-        private readonly Func<string, string, string, SemaphoreSlim, Task<string>> _translateAsync;
+        private readonly Func<string, string, string, SemaphoreSlim, CancellationToken, Task<string>> _translateAsync;
 
         public TranslationBatchProcessor(int maxConcurrency = DefaultMaxConcurrency)
             : this(TranslationService.ProcessAsync, maxConcurrency)
@@ -25,7 +25,7 @@ namespace TranslateText.Services
         }
 
         internal TranslationBatchProcessor(
-            Func<string, string, string, SemaphoreSlim, Task<string>> translateAsync,
+            Func<string, string, string, SemaphoreSlim, CancellationToken, Task<string>> translateAsync,
             int maxConcurrency)
         {
             _translateAsync = translateAsync ?? throw new ArgumentNullException(nameof(translateAsync));
@@ -37,7 +37,9 @@ namespace TranslateText.Services
             IList<TextEntityData> items,
             string sourceLanguage,
             string targetLanguage,
-            TextCaseOption textCase)
+            TextCaseOption textCase,
+            CancellationToken cancellationToken = default,
+            IProgress<int> progress = null)
         {
             if (items == null) throw new ArgumentNullException(nameof(items));
 
@@ -66,7 +68,9 @@ namespace TranslateText.Services
                         sourceLanguage,
                         targetLanguage,
                         textCase,
-                        semaphore));
+                        semaphore,
+                        cancellationToken,
+                        progress));
                 }
 
                 TranslationGroupOutcome[] outcomes = await Task.WhenAll(tasks)
@@ -96,7 +100,9 @@ namespace TranslateText.Services
             string sourceLanguage,
             string targetLanguage,
             TextCaseOption textCase,
-            SemaphoreSlim semaphore)
+            SemaphoreSlim semaphore,
+            CancellationToken cancellationToken,
+            IProgress<int> progress)
         {
             string processedText;
             try
@@ -105,8 +111,15 @@ namespace TranslateText.Services
                     sourceText,
                     sourceLanguage,
                     targetLanguage,
-                    semaphore).ConfigureAwait(false);
+                    semaphore,
+                    cancellationToken).ConfigureAwait(false);
                 processedText = TextCaseHelper.ApplyCaseSafe(translated, textCase);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                foreach (TextEntityData item in items)
+                    item.ProcessedText = item.OriginalText;
+                throw;
             }
             catch (Exception exception)
             {
@@ -118,6 +131,7 @@ namespace TranslateText.Services
                 foreach (TextEntityData item in items)
                     item.ProcessedText = processedText;
 
+                progress?.Report(1);
                 return TranslationGroupOutcome.Failed(
                     $"Không thể dịch \"{preview}\": {exception.Message}");
             }
@@ -126,6 +140,7 @@ namespace TranslateText.Services
             {
                 item.ProcessedText = processedText;
             }
+            progress?.Report(1);
             return TranslationGroupOutcome.Success;
         }
 

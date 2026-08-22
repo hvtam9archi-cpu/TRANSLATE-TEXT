@@ -28,12 +28,6 @@
     <Resource Include="Resource\IconRibbon_ChangeText_32px.ico" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Content Include="Text Font\**\*.*" Exclude="Text Font\**\.DS_Store">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
-
   <Target Name="DeployBundle" AfterTargets="Build" Condition="'$(DeployBundle)' != 'false'">
     <MakeDir Directories="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" />
     <Copy SourceFiles="@(ReferenceCopyLocalPaths)" DestinationFolder="$(AppData)\Autodesk\ApplicationPlugins\TranslateText.bundle\Contents" SkipUnchangedFiles="false" />

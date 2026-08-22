@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -90,45 +91,48 @@ namespace TranslateText
 
                 editor.WriteMessage($"\nProcessing {dataList.Count} objects (Optimized Blocks & Languages)...");
 
-                // 5. Translate unique strings with bounded asynchronous concurrency.
+                // 5. Dịch trên background thread kèm cửa sổ tiến trình modeless
+                //    — AutoCAD không bị khóa trong lúc chờ API dịch thuật.
+                int uniqueCount = CountUniqueTexts(dataList);
+                var progressWindow = new TranslateProgressWindow(uniqueCount);
+                var cancellationTokenSource = new CancellationTokenSource();
+
+                // Đóng cửa sổ tiến trình (✕ hoặc Cancel) cũng là yêu cầu hủy.
+                progressWindow.Closed += (s, e) => cancellationTokenSource.Cancel();
+
                 var batchProcessor = new TranslationBatchProcessor();
-                TranslationBatchResult batchResult = batchProcessor.ProcessAsync(
-                    dataList,
-                    _lastSourceLang,
-                    _lastTargetLang,
-                    _lastTranslateTextCase).GetAwaiter().GetResult();
+                IProgress<int> progress = new UiThreadProgress(completed =>
+                    progressWindow.Dispatcher.BeginInvoke(
+                        new Action(() => progressWindow.ReportCompleted(completed))));
 
-                editor.WriteMessage(
-                    $"\nTranslated {batchResult.UniqueTextCount} unique strings for {batchResult.ItemCount} objects.");
-                if (batchResult.FailedTextCount > 0)
+                AcApp.ShowModelessWindow(progressWindow);
+
+                Task<TranslationBatchResult> translateTask = Task.Run(
+                    () => batchProcessor.ProcessAsync(
+                        dataList,
+                        _lastSourceLang,
+                        _lastTargetLang,
+                        _lastTranslateTextCase,
+                        cancellationTokenSource.Token,
+                        progress),
+                    cancellationTokenSource.Token);
+
+                // 6. Khi AutoCAD rảnh trở lại (main thread), nhận kết quả và ghi vào bản vẽ.
+                EventHandler idleHandler = null;
+                idleHandler = (sender, e) =>
                 {
-                    editor.WriteMessage(
-                        $"\n[TranslateText] {batchResult.FailedTextCount} unique strings could not be translated.");
-                    foreach (string failureMessage in batchResult.FailureMessages)
-                        editor.WriteMessage("\n[TranslateText] " + failureMessage);
-                    if (batchResult.FailedTextCount > batchResult.FailureMessages.Count)
-                    {
-                        editor.WriteMessage(
-                            $"\n[TranslateText] Còn {batchResult.FailedTextCount - batchResult.FailureMessages.Count} lỗi khác; xem log TRACE để biết chi tiết.");
-                    }
-                }
-
-                // 6. Ghi kết quả về AutoCAD trên main thread của command hiện tại.
-                using (Transaction transaction = doc.TransactionManager.StartTransaction())
-                {
-                    ObjectId targetStyleId = ObjectId.Null;
-                    if (selectedStyleName != "Keep Original")
-                    {
-                        TextStyleTable textStyleTable = (TextStyleTable)transaction.GetObject(database.TextStyleTableId, OpenMode.ForRead);
-                        if (textStyleTable.Has(selectedStyleName))
-                            targetStyleId = textStyleTable[selectedStyleName];
-                    }
-
-                    int successCount = entityRepository.Write(transaction, dataList, targetStyleId);
-                    transaction.Commit();
-                    editor.WriteMessage($"\nDone! Translated {successCount} items.");
-                }
-                editor.Regen();
+                    if (!translateTask.IsCompleted) return;
+                    AcApp.Idle -= idleHandler;
+                    FinishTranslation(
+                        doc,
+                        editor,
+                        entityRepository,
+                        dataList,
+                        selectedStyleName,
+                        progressWindow,
+                        translateTask);
+                };
+                AcApp.Idle += idleHandler;
             }
             catch (System.Exception ex)
             {
@@ -186,12 +190,12 @@ namespace TranslateText
                 _lastChangeStyleTextCase = window.SelectedTextCase;
                 AppSettings.Save(targetStyleName, window.SelectedTargetIndex, window.SelectedSourceIndex);
 
-                // 3. Chọn đối tượng
-                PromptSelectionOptions selectionOptions = new PromptSelectionOptions
-                {
-                    MessageForAdding = "\nSelect Text/Block to Change Style:"
-                };
-                PromptSelectionResult selectionResult = editor.GetSelection(selectionOptions);
+                // 3. Chọn đối tượng (dùng filter chung để loại entity không hỗ trợ ngay từ đầu)
+                PromptSelectionResult selectionResult =
+                    TextSelectionInteraction.GetTextSelection(
+                        editor,
+                        "\nSelect Text/MText/MLeader/Dimension/Block to Change Style:",
+                        includeDimensions: true);
                 if (selectionResult.Status != PromptStatus.OK) return;
 
                 // 4. Xử lý — delegate logic sang TextStyleLogic
@@ -202,42 +206,46 @@ namespace TranslateText
                 {
                     TextStyleTable textStyleTable = (TextStyleTable)transaction.GetObject(database.TextStyleTableId, OpenMode.ForRead);
 
-                    if (!string.IsNullOrEmpty(targetStyleName) && textStyleTable.Has(targetStyleName))
+                    if (!textStyleTable.Has(targetStyleName))
                     {
-                        ObjectId targetStyleId = textStyleTable[targetStyleName];
-                        int processedCount = 0;
+                        editor.WriteMessage(
+                            $"\n[ChangeTextStyle] Target style \"{targetStyleName}\" no longer exists. Nothing changed.");
+                        return;
+                    }
 
-                        foreach (SelectedObject selectedObject in selectionResult.Value)
+                    ObjectId targetStyleId = textStyleTable[targetStyleName];
+                    int processedCount = 0;
+
+                    foreach (SelectedObject selectedObject in selectionResult.Value)
+                    {
+                        Entity entity = transaction.GetObject(selectedObject.ObjectId, OpenMode.ForRead) as Entity;
+                        if (entity == null) continue;
+
+                        // Xử lý entity trực tiếp + Attributes
+                        if (logic.ProcessEntity(entity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction))
+                            processedCount++;
+
+                        // Xử lý Block Definition (1 lần mỗi loại block)
+                        if (entity is BlockReference blockRef)
                         {
-                            Entity entity = transaction.GetObject(selectedObject.ObjectId, OpenMode.ForRead) as Entity;
-                            if (entity == null) continue;
-
-                            // Xử lý entity trực tiếp + Attributes
-                            if (logic.ProcessEntity(entity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction))
-                                processedCount++;
-
-                            // Xử lý Block Definition (1 lần mỗi loại block)
-                            if (entity is BlockReference blockRef)
+                            ObjectId blockRecordId = blockRef.BlockTableRecord;
+                            if (!processedBlockDefs.Contains(blockRecordId))
                             {
-                                ObjectId blockRecordId = blockRef.BlockTableRecord;
-                                if (!processedBlockDefs.Contains(blockRecordId))
+                                processedBlockDefs.Add(blockRecordId);
+                                BlockTableRecord blockRecord = (BlockTableRecord)transaction.GetObject(blockRecordId, OpenMode.ForRead);
+                                foreach (ObjectId subId in blockRecord)
                                 {
-                                    processedBlockDefs.Add(blockRecordId);
-                                    BlockTableRecord blockRecord = (BlockTableRecord)transaction.GetObject(blockRecordId, OpenMode.ForRead);
-                                    foreach (ObjectId subId in blockRecord)
-                                    {
-                                        Entity subEntity = transaction.GetObject(subId, OpenMode.ForRead) as Entity;
-                                        if (subEntity != null)
-                                            logic.ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction);
-                                    }
+                                    Entity subEntity = transaction.GetObject(subId, OpenMode.ForRead) as Entity;
+                                    if (subEntity != null)
+                                        logic.ProcessEntity(subEntity, targetStyleId, sourceEncoding, targetEncoding, _lastChangeStyleTextCase, transaction);
                                 }
                             }
                         }
-
-                        transaction.Commit();
-                        editor.WriteMessage($"\nDone. Processed {processedCount} items (plus unique block definitions).");
-                        editor.Regen();
                     }
+
+                    transaction.Commit();
+                    editor.WriteMessage($"\nDone. Processed {processedCount} items (plus unique block definitions).");
+                    editor.Regen();
                 }
             }
             catch (System.Exception ex)
@@ -248,62 +256,106 @@ namespace TranslateText
         }
 
         // ========================================================================================
-        // LỆNH 3: FINDFONT — Kiểm tra và khôi phục font thiếu từ dữ liệu đi kèm plugin
+        // HELPERS — Chạy trên main thread của AutoCAD
         // ========================================================================================
 
-        [CommandMethod("FINDFONT", CommandFlags.UsePickSet)]
-        public void FindFontCmd()
+        private static int CountUniqueTexts(List<TextEntityData> items)
         {
-            Document doc = AcApp.DocumentManager.MdiActiveDocument;
-            if (doc == null) return;
+            var uniqueTexts = new HashSet<string>(StringComparer.Ordinal);
+            foreach (TextEntityData item in items)
+            {
+                if (item != null) uniqueTexts.Add(item.OriginalText ?? string.Empty);
+            }
+            return uniqueTexts.Count;
+        }
 
-            Editor editor = doc.Editor;
+        /// <summary>
+        /// Nhận kết quả dịch thuật và ghi vào bản vẽ. Chạy trên main thread
+        /// (Application.Idle) nên phải khóa document trước khi mở transaction.
+        /// </summary>
+        private static void FinishTranslation(
+            Document doc,
+            Editor editor,
+            TranslationEntityRepository entityRepository,
+            List<TextEntityData> dataList,
+            string selectedStyleName,
+            TranslateProgressWindow progressWindow,
+            Task<TranslationBatchResult> translateTask)
+        {
             try
             {
-                PromptSelectionResult selectionResult =
-                    TextSelectionInteraction.GetTextSelection(
-                        editor,
-                        "\nChọn Text/MText/Attribute/MLeader/Dimension/Block cần kiểm tra font:",
-                        includeDimensions: true);
-                if (selectionResult.Status != PromptStatus.OK) return;
+                progressWindow.Close();
 
-                string fontRoot = FontRepairService.GetDeployedFontRoot();
-                if (!Directory.Exists(fontRoot))
+                if (translateTask.IsCanceled || IsCancellation(translateTask))
                 {
-                    editor.WriteMessage(
-                        $"\n[FindFont] Không tìm thấy thư mục font của plugin: {fontRoot}");
+                    editor.WriteMessage("\n[TranslateText] Cancelled.");
                     return;
                 }
 
-                var service = new FontRepairService();
-                FontRepairResult result = service.Repair(
-                    doc.Database,
-                    selectionResult.Value.GetObjectIds(),
-                    fontRoot);
-
-                foreach (string message in result.Messages)
-                    editor.WriteMessage("\n[FindFont] " + message);
-
-                if (result.MissingFontCount == 0)
+                if (translateTask.IsFaulted)
                 {
-                    editor.WriteMessage(
-                        $"\n[FindFont] Không phát hiện font thiếu trong {result.TextStyleCount} Text Style đã kiểm tra.");
-                }
-                else
-                {
-                    editor.WriteMessage(
-                        $"\n[FindFont] Hoàn tất: kiểm tra {result.TextStyleCount} Text Style, " +
-                        $"thiếu {result.MissingFontCount}, khôi phục {result.RepairedFontCount}, " +
-                        $"chưa tìm thấy {result.UnresolvedFontCount}.");
+                    System.Exception exception = translateTask.Exception?.GetBaseException();
+                    DiagnosticsTrace.TraceError($"[TRANSLATETEXT.Apply] {exception}");
+                    editor.WriteMessage($"\n[TranslateText] Error: {exception?.Message}");
+                    return;
                 }
 
-                if (result.RepairedFontCount > 0) editor.Regen();
+                TranslationBatchResult batchResult = translateTask.Result;
+
+                editor.WriteMessage(
+                    $"\nTranslated {batchResult.UniqueTextCount} unique strings for {batchResult.ItemCount} objects.");
+                if (batchResult.FailedTextCount > 0)
+                {
+                    editor.WriteMessage(
+                        $"\n[TranslateText] {batchResult.FailedTextCount} unique strings could not be translated.");
+                    foreach (string failureMessage in batchResult.FailureMessages)
+                        editor.WriteMessage("\n[TranslateText] " + failureMessage);
+                }
+
+                using (DocumentLock documentLock = doc.LockDocument())
+                using (Transaction transaction = doc.Database.TransactionManager.StartTransaction())
+                {
+                    ObjectId targetStyleId = ObjectId.Null;
+                    if (selectedStyleName != "Keep Original")
+                    {
+                        TextStyleTable textStyleTable = (TextStyleTable)transaction.GetObject(
+                            doc.Database.TextStyleTableId, OpenMode.ForRead);
+                        if (textStyleTable.Has(selectedStyleName))
+                            targetStyleId = textStyleTable[selectedStyleName];
+                    }
+
+                    int successCount = entityRepository.Write(transaction, dataList, targetStyleId);
+                    transaction.Commit();
+                    editor.WriteMessage($"\nDone! Translated {successCount} items.");
+                }
+                editor.Regen();
             }
             catch (System.Exception ex)
             {
-                DiagnosticsTrace.TraceError($"[FINDFONT] {ex}");
-                editor.WriteMessage($"\n[FindFont] Lỗi: {ex.Message}");
+                DiagnosticsTrace.TraceError($"[TRANSLATETEXT.Apply] {ex}");
+                editor.WriteMessage($"\n[TranslateText] Error: {ex.Message}");
             }
+        }
+
+        private static bool IsCancellation(Task task)
+        {
+            return task.Exception?.GetBaseException() is OperationCanceledException;
+        }
+
+        /// <summary>
+        /// IProgress<int> đẩy callback về UI thread của cửa sổ tiến trình,
+        /// không phụ thuộc SynchronizationContext hiện hành của main thread AutoCAD.
+        /// </summary>
+        private sealed class UiThreadProgress : IProgress<int>
+        {
+            private readonly Action<int> _report;
+
+            public UiThreadProgress(Action<int> report)
+            {
+                _report = report ?? throw new ArgumentNullException(nameof(report));
+            }
+
+            void IProgress<int>.Report(int value) => _report(value);
         }
     }
 }
