@@ -303,13 +303,14 @@ namespace TranslateText
                 TranslationBatchResult batchResult = translateTask.Result;
 
                 editor.WriteMessage(
-                    $"\nTranslated {batchResult.UniqueTextCount} unique strings for {batchResult.ItemCount} objects.");
+                    $"\nTranslated {batchResult.UniqueTextCount - batchResult.FailedTextCount}/{batchResult.UniqueTextCount} unique strings for {batchResult.ItemCount} objects.");
                 if (batchResult.FailedTextCount > 0)
                 {
                     editor.WriteMessage(
                         $"\n[TranslateText] {batchResult.FailedTextCount} unique strings could not be translated.");
                     foreach (string failureMessage in batchResult.FailureMessages)
                         editor.WriteMessage("\n[TranslateText] " + failureMessage);
+                    if (batchResult.FailedTextCount == batchResult.UniqueTextCount) return;
                 }
 
                 using (DocumentLock documentLock = doc.LockDocument())

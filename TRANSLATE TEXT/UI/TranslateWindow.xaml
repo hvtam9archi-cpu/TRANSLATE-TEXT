@@ -6,7 +6,7 @@
         mc:Ignorable="d"
         x:Class="TranslateText.UI.TranslateWindow"
         Title="Translate Text"
-        Width="440" Height="270"
+        Width="440" Height="320"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -61,6 +61,8 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="10"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="10"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="110"/>
@@ -94,6 +96,16 @@
                 <ComboBox x:Name="cbTextCase" Grid.Row="6" Grid.Column="1"
                           Style="{StaticResource DarkComboBox}"
                           ItemContainerStyle="{StaticResource DarkComboBoxItem}"/>
+
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="Cloud API key:"
+                           Style="{StaticResource FormLabel}"/>
+                <PasswordBox x:Name="pbCloudApiKey" Grid.Row="8" Grid.Column="1"
+                             Height="30" Padding="8,3" VerticalContentAlignment="Center"
+                             Background="{StaticResource SurfaceBrush}"
+                             Foreground="{StaticResource FgBrush}"
+                             BorderBrush="{StaticResource BorderBrush}"
+                             AutomationProperties.Name="Google Cloud Translation API key"
+                             ToolTip="Google Cloud Translation Basic (v2). Leave blank to use the free endpoint."/>
             </Grid>
 
             <!-- Bottom Bar -->

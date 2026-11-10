@@ -2,11 +2,14 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Input;
 using TranslateText.Models;
+using TranslateText.Services;
 
 namespace TranslateText.UI
 {
     public partial class TranslateWindow : Window
     {
+        private readonly string _savedApiKey;
+
         public string SelectedSourceCode { get; private set; }
         public string SelectedTargetCode { get; private set; }
         public string SelectedTextStyle { get; private set; }
@@ -16,6 +19,8 @@ namespace TranslateText.UI
         public TranslateWindow(string defaultSource, string defaultTarget, List<string> styleList, string defaultStyle, TranslateText.Core.TextCaseOption defaultTextCase)
         {
             InitializeComponent();
+            _savedApiKey = AppSettings.LoadApiKey() ?? string.Empty;
+            pbCloudApiKey.Password = _savedApiKey;
             if (PluginImageLoader.TryLoad(
                 "Resource/IconRibbon_TranslateText_32px.ico",
                 out System.Windows.Media.ImageSource icon))
@@ -94,6 +99,18 @@ namespace TranslateText.UI
 
         private void BtnTranslate_Click(object sender, RoutedEventArgs e)
         {
+            string apiKey = pbCloudApiKey.Password.Trim();
+            if (apiKey != _savedApiKey)
+            {
+                AppSettings.SaveApiKey(apiKey);
+                if ((AppSettings.LoadApiKey() ?? string.Empty) != apiKey)
+                {
+                    MessageBox.Show(this, "Could not save the Cloud API key.",
+                        "Translate Text", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+
             if (cbSource.SelectedItem is LanguageItem sourceLang)
                 SelectedSourceCode = sourceLang.Code;
             else

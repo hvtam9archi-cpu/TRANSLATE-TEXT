@@ -28,8 +28,8 @@ namespace TranslateText.Services
             new ConcurrentDictionary<string, string>();
         private static readonly ConcurrentQueue<string> CacheOrder =
             new ConcurrentQueue<string>();
-        private static readonly ConcurrentDictionary<string, Lazy<Task<string>>> InFlight =
-            new ConcurrentDictionary<string, Lazy<Task<string>>>();
+        private static readonly ConcurrentDictionary<(string CacheKey, string ApiKey), Lazy<Task<string>>> InFlight =
+            new ConcurrentDictionary<(string CacheKey, string ApiKey), Lazy<Task<string>>>();
         private static readonly string[] UserAgents =
         {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -74,13 +74,16 @@ namespace TranslateText.Services
                 input);
             if (Cache.TryGetValue(cacheKey, out string cachedResult)) return cachedResult;
 
+            string apiKey = AppSettings.LoadApiKey()?.Trim() ?? string.Empty;
+            var requestKey = (CacheKey: cacheKey, ApiKey: apiKey);
             Lazy<Task<string>> pending = InFlight.GetOrAdd(
-                cacheKey,
+                requestKey,
                 _ => new Lazy<Task<string>>(
                     () => ProcessUncachedAsync(
                         input,
                         sourceLanguage,
                         targetLanguage,
+                        apiKey,
                         semaphore,
                         cacheKey,
                         cancellationToken),
@@ -92,8 +95,8 @@ namespace TranslateText.Services
             }
             finally
             {
-                var entry = new KeyValuePair<string, Lazy<Task<string>>>(cacheKey, pending);
-                ((ICollection<KeyValuePair<string, Lazy<Task<string>>>>)InFlight).Remove(entry);
+                var entry = new KeyValuePair<(string CacheKey, string ApiKey), Lazy<Task<string>>>(requestKey, pending);
+                ((ICollection<KeyValuePair<(string CacheKey, string ApiKey), Lazy<Task<string>>>>)InFlight).Remove(entry);
             }
         }
 
@@ -101,6 +104,7 @@ namespace TranslateText.Services
             string input,
             string sourceLanguage,
             string targetLanguage,
+            string apiKey,
             SemaphoreSlim semaphore,
             string cacheKey,
             CancellationToken cancellationToken)
@@ -130,6 +134,7 @@ namespace TranslateText.Services
                 maskResult.MaskedText,
                 sourceLanguage,
                 targetLanguage,
+                apiKey,
                 semaphore,
                 cancellationToken).ConfigureAwait(false);
             string finalText = FormatProtector.UnmaskText(translatedText, maskResult.Codes);
@@ -154,13 +159,13 @@ namespace TranslateText.Services
             string text,
             string sourceLanguage,
             string targetLanguage,
+            string apiKey,
             SemaphoreSlim semaphore,
             CancellationToken cancellationToken)
         {
             await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                string apiKey = AppSettings.LoadApiKey();
                 Exception lastException = null;
 
                 for (int attempt = 0; attempt < MaxApiAttempts; attempt++)
@@ -199,8 +204,11 @@ namespace TranslateText.Services
                     }
                 }
 
+                string reason = lastException is TaskCanceledException
+                    ? "The request timed out."
+                    : lastException?.Message;
                 throw new InvalidOperationException(
-                    $"Translation API failed after {MaxApiAttempts} attempts.",
+                    $"Translation API failed after {MaxApiAttempts} attempts. {reason}",
                     lastException);
             }
             finally
@@ -216,6 +224,30 @@ namespace TranslateText.Services
                 exception is InvalidDataException;
         }
 
+        private static void EnsureTranslationSuccess(HttpResponseMessage response, bool useCloud)
+        {
+            int statusCode = (int)response.StatusCode;
+            if (!useCloud && statusCode == 429)
+            {
+                throw new InvalidOperationException(
+                    "Free Google Translate returned HTTP 429 (Too Many Requests). " +
+                    "Enter a Google Cloud Translation API key in the Translate Text dialog.");
+            }
+
+            if (statusCode >= 400 && statusCode < 500 && statusCode != 408 && statusCode != 429)
+            {
+                string provider = useCloud ? "Google Cloud Translation" : "Free Google Translate";
+                string message = $"{provider} returned HTTP {statusCode} ({response.StatusCode}).";
+                if (useCloud && (statusCode == 400 || statusCode == 401 || statusCode == 403))
+                {
+                    message += " Check the API key, Cloud Translation API access, billing, and quota.";
+                }
+                throw new InvalidOperationException(message);
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+
         private static async Task<string> CallCloudTranslationApiAsync(
             string text,
             string sourceLanguage,
@@ -223,8 +255,7 @@ namespace TranslateText.Services
             string apiKey,
             CancellationToken cancellationToken)
         {
-            string url =
-                $"https://translation.googleapis.com/language/translate/v2?key={apiKey}";
+            const string url = "https://translation.googleapis.com/language/translate/v2";
             var payload = new Dictionary<string, string>
             {
                 ["q"] = text,
@@ -235,15 +266,19 @@ namespace TranslateText.Services
                 payload["source"] = sourceLanguage;
 
             string jsonPayload = new JavaScriptSerializer().Serialize(payload);
-            using (var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json"))
-             using (HttpResponseMessage response = await HttpClient
-                 .PostAsync(url, content, cancellationToken)
-                 .ConfigureAwait(false))
-             {
-                 response.EnsureSuccessStatusCode();
-                 string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                 return ParseCloudTranslationJson(json);
-             }
+            using (var request = new HttpRequestMessage(HttpMethod.Post, url))
+            {
+                request.Headers.Add("X-Goog-Api-Key", apiKey);
+                request.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+                using (HttpResponseMessage response = await HttpClient
+                    .SendAsync(request, cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    EnsureTranslationSuccess(response, useCloud: true);
+                    string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    return ParseCloudTranslationJson(json);
+                }
+            }
         }
 
         private static string ParseCloudTranslationJson(string json)
@@ -301,7 +336,7 @@ namespace TranslateText.Services
                      .SendAsync(request, cancellationToken)
                      .ConfigureAwait(false))
                  {
-                     response.EnsureSuccessStatusCode();
+                     EnsureTranslationSuccess(response, useCloud: false);
                      string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                      return ParseFreeTranslateJson(json);
                  }
